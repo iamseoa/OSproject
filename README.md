@@ -9,7 +9,6 @@
 Input → Conv2D → ReLU → MaxPool2D → Flatten → FullyConnected → Softmax → Output
 
 - 입력값, weight, bias는 단순 초기화
-- 입력 데이터: 무작위 생성 또는 CIFAR10 추출 텍스트 사용
 
 ---
 
@@ -24,14 +23,11 @@ Input → Conv2D → ReLU → MaxPool2D → Flatten → FullyConnected → Softm
 | (가) | 단일 thread만 사용 |
 | (나) | 단일 child process + thread 사용 |
 | (다) | 다중 process + 다중 thread |
-| (라) | Hybrid 구조 |
-| (마) | sync 유무 비교 (mutex, barrier 등)
+| (라) | Hybrid 구조 (적절히 multiprocess와 multithread 사용) |
+| (마) | sync 유무 비교 |
 
-### 3. 역할 분담
-- 각자 CNN의 특정 계층/병렬 구조/측정 항목 담당
-
-### 4. GitHub 공동 작업
-- 브랜치 분리: `main`, `dev`, 개인 브랜치 (`seo-conv2d`, `hje-thread`, …)
+### 3. GitHub 공동 작업
+- 브랜치 분리: `main`, 개인 브랜치
 - PR + 리뷰 기반 코드 병합
 
 ---
@@ -40,10 +36,9 @@ Input → Conv2D → ReLU → MaxPool2D → Flatten → FullyConnected → Softm
 
 - Step 1: Baseline CNN 단일 구조 구현
 - Step 2: Conv2D 계층 병렬화 (5가지 조건)
-- Step 3: MaxPool2D 계층 병렬화
-- Step 4: FullyConnected 계층 병렬화
-- Step 5: 최적 구조 조합 CNN 구현
-- Step 6: Baseline과의 성능 비교
+- Step 3: FullyConnected 계층 병렬화
+- Step 4: 최적 구조 조합 CNN 구현
+- Step 5: Baseline과의 성능 비교
 
 > ⚠️ 실험 중 성능 개선 아이디어가 나오면 최적화 추가 가능
 
@@ -66,29 +61,25 @@ Input → Conv2D → ReLU → MaxPool2D → Flatten → FullyConnected → Softm
 
 ---
 
-## 📁 폴더 구조 (예정)
-/src         → CNN 구조 및 병렬화 구현
-/include     → 헤더 파일
-/data        → 입력값 텍스트 파일
-/results     → 측정 결과 로그
-/plots       → 그래프 이미지
-README.md    → 프로젝트 설명서
+## 📁 폴더 구조 
+OSproject/
+├── README.md              # 프로젝트 설명
+├── .gitignore             # 실행파일, 중간 빌드 결과 제외
+│
+├── /src                   # CNN 구조 및 병렬화 구현 소스
+│   ├── baseline/          # 단일 스레드 구현
+│   ├── pthread/           # pthread 기반 병렬 처리
+│   ├── fork/              # fork 기반 병렬 처리
+│   └── hybrid/            # fork + pthread 혼합 구조
+│
+├── /include               # 공통 헤더 파일
+│   └── cnn.h              # 함수 선언, 구조체 등
+│
+└── /bin                   # ⚙️ 빌드된 실행 파일 저장
+    ├── baseline.out
+    ├── pthread.out
+    ├── fork.out
+    └── hybrid.out
 
 ---
 
-## 👨‍👩‍👧‍👦 팀 구성
-
-| 이름 | 역할 |
-|------|------|
-| 서아 | Conv2D, fork 구조 |
-| 화정 | FC layer, pthread 병렬화 |
-| 수빈 | 동기화 실험, shared memory |
-| 서연 | 실험 자동화, 측정 스크립트 작성
-
----
-
-## 🔒 브랜치 전략
-
-- `main`: 최종 제출용 (직접 push 금지)
-- `dev`: 실험 통합 브랜치
-- `개인 브랜치`: 기능별 개발 후 PR로 `dev`에 병합
