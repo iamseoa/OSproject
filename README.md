@@ -62,26 +62,29 @@ Input → Conv2D → ReLU → MaxPool2D → Flatten → FullyConnected → Softm
 ---
 
 ## 📁 폴더 구조 
-'''
-OSproject/
-├── README.md           # 프로젝트 설명
-├── .gitignore          # 실행파일, 중간 빌드 결과 제외
 
-├── /src                # CNN 구조 및 병렬화 구현 소스
+## 📁 폴더 구조
+
+```
+OSproject/
+├── README.md           # 📄 프로젝트 설명
+├── .gitignore          # 🛡️ 실행파일, 중간 빌드 결과 제외
+
+├── /src                # ⚙️ CNN 구조 및 병렬화 구현 소스
 │   ├── baseline/       # 단일 스레드 구현
 │   ├── pthread/        # pthread 기반 병렬 처리
 │   ├── fork/           # fork 기반 병렬 처리
 │   └── hybrid/         # fork + pthread 혼합 구조
 
-├── /include            # 공통 헤더 파일
+├── /include            # 📎 공통 헤더 파일
 │   └── cnn.h           # 함수 선언, 구조체 등
 
-└── /bin                # 빌드된 실행 파일 저장
+└── /bin                # ⚙️ 빌드된 실행 파일 저장
     ├── baseline.out
     ├── pthread.out
     ├── fork.out
     └── hybrid.out
-'''
+```
 
 ---
 
