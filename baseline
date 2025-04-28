@@ -1,0 +1,104 @@
+#include "layers.h"
+#include "calc_times.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/times.h>
+#include <unistd.h>
+
+#define INPUT_C 3
+#define CONV_OUT_C 16
+#define FC1_OUT 128
+#define FC2_OUT 20
+
+struct tms tmsstart, tmsend;
+clock_t start, end;
+
+void initialize_data(float *input, int in_c, int in_h, int in_w,
+                     float *conv_weight, float *conv_bias,
+                     float *fc1_weight, float *fc1_bias,
+                     float *fc2_weight, float *fc2_bias) {
+    for (int c = 0; c < in_c; c++)
+        for (int i = 0; i < in_h; i++)
+            for (int j = 0; j < in_w; j++)
+                input[c*in_h*in_w + i*in_w + j] = c + i + j;
+
+    for (int i = 0; i < CONV_OUT_C * INPUT_C * 3 * 3; i++)
+        conv_weight[i] = 1.0f;
+    for (int i = 0; i < CONV_OUT_C; i++)
+        conv_bias[i] = 0.0f;
+
+    for (int i = 0; i < FC1_OUT * 4096; i++)
+        fc1_weight[i] = 0.01f * (i % 5);
+    for (int i = 0; i < FC1_OUT; i++)
+        fc1_bias[i] = 0.0f;
+
+    for (int i = 0; i < FC2_OUT * FC1_OUT; i++)
+        fc2_weight[i] = 1.0f;
+    for (int i = 0; i < FC2_OUT; i++)
+        fc2_bias[i] = 0.0f;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        printf("Usage: %s <input_size>\n", argv[0]);
+        return -1;
+    }
+
+    int input_size = atoi(argv[1]);
+    int input_h = input_size;
+    int input_w = input_size;
+
+    int pool_h = input_h / 2;
+    int pool_w = input_w / 2;
+    int flatten_dim = CONV_OUT_C * pool_h * pool_w;
+
+    float *input = malloc(sizeof(float) * INPUT_C * input_h * input_w);
+    float *conv_weight = malloc(sizeof(float) * CONV_OUT_C * INPUT_C * 3 * 3);
+    float *conv_bias = malloc(sizeof(float) * CONV_OUT_C);
+    float *conv_out = malloc(sizeof(float) * CONV_OUT_C * input_h * input_w);
+    float *pool_out = malloc(sizeof(float) * CONV_OUT_C * pool_h * pool_w);
+    float *flatten_out = malloc(sizeof(float) * flatten_dim);
+    float *fc1_out = malloc(sizeof(float) * FC1_OUT);
+    float *fc2_out = malloc(sizeof(float) * FC2_OUT);
+    float *fc1_weight = malloc(sizeof(float) * FC1_OUT * flatten_dim);
+    float *fc1_bias = malloc(sizeof(float) * FC1_OUT);
+    float *fc2_weight = malloc(sizeof(float) * FC2_OUT * FC1_OUT);
+    float *fc2_bias = malloc(sizeof(float) * FC2_OUT);
+
+    initialize_data(input, INPUT_C, input_h, input_w,
+                    conv_weight, conv_bias,
+                    fc1_weight, fc1_bias,
+                    fc2_weight, fc2_bias);
+
+    // 🔥 CPU Time 측정 시작
+    start = times(&tmsstart);
+
+    conv2d(input, INPUT_C, input_h, input_w, conv_weight, conv_bias, CONV_OUT_C, conv_out);
+    relu(conv_out, CONV_OUT_C * input_h * input_w);
+    maxpool2d(conv_out, CONV_OUT_C, input_h, input_w, pool_out);
+    flatten(pool_out, CONV_OUT_C, pool_h, pool_w, flatten_out);
+    fully_connected(flatten_out, flatten_dim, fc1_weight, fc1_bias, fc1_out, FC1_OUT);
+    fully_connected(fc1_out, FC1_OUT, fc2_weight, fc2_bias, fc2_out, FC2_OUT);
+    softmax(fc2_out, FC2_OUT);
+
+    end = times(&tmsend);
+    // 🔥 CPU Time 측정 끝
+
+    // 🔥 CPU Time 출력
+    printf("\n=== CPU Time Measurement ===\n");
+    pr_times(end - start, &tmsstart, &tmsend);
+
+    // 🔥 Softmax 출력
+    printf("\n=== Softmax Output ===\n");
+    for (int i = 0; i < FC2_OUT; i++) {
+        printf("Class %2d: %.6f\n", i, fc2_out[i]);
+    }
+
+    free(input); free(conv_weight); free(conv_bias);
+    free(conv_out); free(pool_out); free(flatten_out);
+    free(fc1_out); free(fc2_out); free(fc1_weight); free(fc1_bias);
+    free(fc2_weight); free(fc2_bias);
+
+    return 0;
+}
