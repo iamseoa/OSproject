@@ -1,7 +1,5 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/resource.h>
 #include "layers.h"
+#include <sys/resource.h>
 
 #define NUM_INPUTS 9
 
@@ -30,37 +28,58 @@ void print_resource_usage() {
 int main() {
     init_input_streams();
 
-    Conv2DLayer conv_layer = {3, 16, 3};
-    MaxPool2DLayer pool_layer = {2};
-    FullyConnected1Layer fc1_layer = {FC1_INPUT_SIZE, FC1_SIZE};
-    FullyConnected2Layer fc2_layer = {FC1_SIZE, FC2_SIZE};
+    // 레이어들 생성
+    Conv2DLayer conv_layer;
+    conv_layer.in_channels = 3;
+    conv_layer.out_channels = 16;
+    conv_layer.kernel_size = 3;
 
-    // Weights 초기화
-    for (int f = 0; f < 16; f++)
-        for (int c = 0; c < 3; c++)
-            for (int i = 0; i < 3; i++)
-                for (int j = 0; j < 3; j++)
+    // Conv2D weights malloc
+    conv_layer.weights = (double****)malloc(sizeof(double***) * conv_layer.out_channels);
+    for (int f = 0; f < conv_layer.out_channels; f++) {
+        conv_layer.weights[f] = (double***)malloc(sizeof(double**) * conv_layer.in_channels);
+        for (int c = 0; c < conv_layer.in_channels; c++) {
+            conv_layer.weights[f][c] = (double**)malloc(sizeof(double*) * 3);
+            for (int i = 0; i < 3; i++) {
+                conv_layer.weights[f][c][i] = (double*)malloc(sizeof(double) * 3);
+                for (int j = 0; j < 3; j++) {
                     conv_layer.weights[f][c][i][j] = (i % 2 == 0) ? 0.5 : 0.0;
+                }
+            }
+        }
+    }
 
-    for (int i = 0; i < FC1_INPUT_SIZE; i++)
+    MaxPool2DLayer pool_layer = {2};
+
+    FullyConnected1Layer fc1_layer;
+    fc1_layer.input_size = FC1_INPUT_SIZE;
+    fc1_layer.output_size = FC1_SIZE;
+    fc1_layer.weights = (double**)malloc(sizeof(double*) * FC1_INPUT_SIZE);
+    for (int i = 0; i < FC1_INPUT_SIZE; i++) {
+        fc1_layer.weights[i] = (double*)malloc(sizeof(double) * FC1_SIZE);
         for (int j = 0; j < FC1_SIZE; j++)
             fc1_layer.weights[i][j] = (i % 2 == 0) ? 0.5 : 0.0;
-
+    }
+    fc1_layer.bias = (double*)malloc(sizeof(double) * FC1_SIZE);
     for (int j = 0; j < FC1_SIZE; j++)
         fc1_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
 
-    for (int i = 0; i < FC1_SIZE; i++)
+    FullyConnected2Layer fc2_layer;
+    fc2_layer.input_size = FC1_SIZE;
+    fc2_layer.output_size = FC2_SIZE;
+    fc2_layer.weights = (double**)malloc(sizeof(double*) * FC1_SIZE);
+    for (int i = 0; i < FC1_SIZE; i++) {
+        fc2_layer.weights[i] = (double*)malloc(sizeof(double) * FC2_SIZE);
         for (int j = 0; j < FC2_SIZE; j++)
             fc2_layer.weights[i][j] = (i % 2 == 0) ? 0.5 : 0.0;
-
+    }
+    fc2_layer.bias = (double*)malloc(sizeof(double) * FC2_SIZE);
     for (int j = 0; j < FC2_SIZE; j++)
         fc2_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
 
-    // output 메모리 (conv_output, pool_output은 그냥 배열 사용)
-    double conv_output[16][VALID_SIZE][VALID_SIZE] = {0};
-    double pool_output[16][POOL_SIZE][POOL_SIZE] = {0};
-
-    // flatten_output, fc1_output, fc2_output은 malloc으로 동적할당
+    // Output용 메모리 동적할당
+    double (*conv_output)[VALID_SIZE][VALID_SIZE] = malloc(sizeof(double) * 16 * VALID_SIZE * VALID_SIZE);
+    double (*pool_output)[POOL_SIZE][POOL_SIZE] = malloc(sizeof(double) * 16 * POOL_SIZE * POOL_SIZE);
     double* flatten_output = (double*)malloc(sizeof(double) * FC1_INPUT_SIZE);
     double* fc1_output = (double*)malloc(sizeof(double) * FC1_SIZE);
     double* fc2_output = (double*)malloc(sizeof(double) * FC2_SIZE);
@@ -99,6 +118,32 @@ int main() {
     free(flatten_output);
     free(fc1_output);
     free(fc2_output);
+    free(conv_output);
+    free(pool_output);
+
+    // conv_layer 해제
+    for (int f = 0; f < conv_layer.out_channels; f++) {
+        for (int c = 0; c < conv_layer.in_channels; c++) {
+            for (int i = 0; i < 3; i++) {
+                free(conv_layer.weights[f][c][i]);
+            }
+            free(conv_layer.weights[f][c]);
+        }
+        free(conv_layer.weights[f]);
+    }
+    free(conv_layer.weights);
+
+    // fc1_layer 해제
+    for (int i = 0; i < fc1_layer.input_size; i++)
+        free(fc1_layer.weights[i]);
+    free(fc1_layer.weights);
+    free(fc1_layer.bias);
+
+    // fc2_layer 해제
+    for (int i = 0; i < fc2_layer.input_size; i++)
+        free(fc2_layer.weights[i]);
+    free(fc2_layer.weights);
+    free(fc2_layer.bias);
 
     return 0;
 }
