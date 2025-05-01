@@ -1,134 +1,171 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/wait.h>
+#include <string.h>
 #include <semaphore.h>
-#include "layers.h"  // Conv2D, MaxPool2D, FullyConnected 정의 포함
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#include "layers.h"
 
-#define NUM_STREAMS 9
-#define NUM_CHILDREN 4
+#define NUM_INPUTS 9
 
-sem_t sem;
+typedef struct {
+    Conv2DLayer conv_layer;
+    FullyConnected1Layer fc1_layer;
+    FullyConnected2Layer fc2_layer;
+    MaxPool2DLayer pool_layer;
 
-void process_stream(int stream_id, double input[3][SIZE][SIZE], Conv2DLayer* conv_layer, MaxPool2DLayer* pool_layer, FullyConnected1Layer* fc1_layer, FullyConnected2Layer* fc2_layer) {
-    double conv_output[16][VALID_SIZE][VALID_SIZE] = {0};
-    double pool_output[16][POOL_SIZE][POOL_SIZE] = {0};
-    double *flatten_output = (double*)malloc(sizeof(double) * FC1_INPUT_SIZE);
-    double *fc1_output = (double*)malloc(sizeof(double) * FC1_SIZE);
-    double *fc2_output = (double*)malloc(sizeof(double) * FC2_SIZE);
+    sem_t conv_sem;
+    sem_t pool_sem;
+    sem_t fc1_sem;
+    sem_t fc2_sem;
+} SharedLayers;
 
-    conv2d_forward(conv_layer, input, conv_output);
-    relu_forward(conv_output);
-    maxpool2d_forward(pool_layer, conv_output, pool_output);
-    flatten_forward(pool_output, flatten_output);
-    fc1_forward(fc1_layer, flatten_output, fc1_output);
-    fc2_forward(fc2_layer, fc1_output, fc2_output);
+void print_resource_usage() {
+    struct rusage usage;
+    getrusage(RUSAGE_SELF, &usage);
+    printf("Max RSS: %ld KB\n", usage.ru_maxrss);
+}
 
-    sem_wait(&sem);
-    printf("\n===== Finished input stream #%d (Child PID: %d) =====\n", stream_id, getpid());
-    printf("Conv2D output sample: ");
-    for (int i = 0; i < 5; i++) printf("%.5f ", conv_output[0][i][i]);
-    printf("\n");
+void* shared_alloc(size_t size) {
+    void* ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (ptr == MAP_FAILED) {
+        perror("mmap failed");
+        exit(1);
+    }
+    return ptr;
+}
 
-    printf("FC1 output sample: ");
-    for (int i = 0; i < 5; i++) printf("%.5f ", fc1_output[i]);
-    printf("\n");
+void init_shared_layers(SharedLayers* shared) {
+    sem_init(&shared->conv_sem, 1, 1);
+    sem_init(&shared->pool_sem, 1, 1);
+    sem_init(&shared->fc1_sem, 1, 1);
+    sem_init(&shared->fc2_sem, 1, 1);
 
-    printf("FC2 output sample: ");
-    for (int i = 0; i < 5; i++) printf("%.5f ", fc2_output[i]);
-    printf("\n");
-    sem_post(&sem);
+    shared->conv_layer.in_channels = 3;
+    shared->conv_layer.out_channels = 16;
+    shared->conv_layer.kernel_size = 3;
+    shared->conv_layer.weights = shared_alloc(sizeof(double***) * 16);
+    for (int f = 0; f < 16; f++) {
+        shared->conv_layer.weights[f] = shared_alloc(sizeof(double**) * 3);
+        for (int c = 0; c < 3; c++) {
+            shared->conv_layer.weights[f][c] = shared_alloc(sizeof(double*) * 3);
+            for (int i = 0; i < 3; i++) {
+                shared->conv_layer.weights[f][c][i] = shared_alloc(sizeof(double) * 3);
+                for (int j = 0; j < 3; j++)
+                    shared->conv_layer.weights[f][c][i][j] = (i % 2 == 0) ? 0.5 : 0.0;
+            }
+        }
+    }
 
-    free(flatten_output);
-    free(fc1_output);
-    free(fc2_output);
+    shared->fc1_layer.input_size = FC1_INPUT_SIZE;
+    shared->fc1_layer.output_size = FC1_SIZE;
+    shared->fc1_layer.weights = shared_alloc(sizeof(double*) * FC1_INPUT_SIZE);
+    for (int i = 0; i < FC1_INPUT_SIZE; i++) {
+        shared->fc1_layer.weights[i] = shared_alloc(sizeof(double) * FC1_SIZE);
+        for (int j = 0; j < FC1_SIZE; j++)
+            shared->fc1_layer.weights[i][j] = (i % 2 == 0) ? 0.5 : 0.0;
+    }
+    shared->fc1_layer.bias = shared_alloc(sizeof(double) * FC1_SIZE);
+    for (int j = 0; j < FC1_SIZE; j++)
+        shared->fc1_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
+
+    shared->fc2_layer.input_size = FC1_SIZE;
+    shared->fc2_layer.output_size = FC2_SIZE;
+    shared->fc2_layer.weights = shared_alloc(sizeof(double*) * FC1_SIZE);
+    for (int i = 0; i < FC1_SIZE; i++) {
+        shared->fc2_layer.weights[i] = shared_alloc(sizeof(double) * FC2_SIZE);
+        for (int j = 0; j < FC2_SIZE; j++)
+            shared->fc2_layer.weights[i][j] = (i % 2 == 0) ? 0.5 : 0.0;
+    }
+    shared->fc2_layer.bias = shared_alloc(sizeof(double) * FC2_SIZE);
+    for (int j = 0; j < FC2_SIZE; j++)
+        shared->fc2_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
+
+    shared->pool_layer.pool_size = 2;
+}
+
+void init_input(double (*input)[SIZE][SIZE], int value) {
+    for (int c = 0; c < 3; c++)
+        for (int i = 0; i < SIZE; i++)
+            for (int j = 0; j < SIZE; j++)
+                input[c][i][j] = (double)value;
 }
 
 int main() {
-    double input_streams[NUM_STREAMS][3][SIZE][SIZE];
-    for (int n = 0; n < NUM_STREAMS; n++)
-        for (int c = 0; c < 3; c++)
-            for (int i = 0; i < SIZE; i++)
-                for (int j = 0; j < SIZE; j++)
-                    input_streams[n][c][i][j] = (double)(n + 1);
+    SharedLayers* shared = shared_alloc(sizeof(SharedLayers));
+    init_shared_layers(shared);
 
-    // 레이어 초기화
-    Conv2DLayer conv_layer = {3, 16, 3, NULL};
-    conv_layer.weights = (double****)malloc(sizeof(double***) * 16);
-    for (int f = 0; f < 16; f++) {
-        conv_layer.weights[f] = (double***)malloc(sizeof(double**) * 3);
-        for (int c = 0; c < 3; c++) {
-            conv_layer.weights[f][c] = (double**)malloc(sizeof(double*) * 3);
-            for (int i = 0; i < 3; i++) {
-                conv_layer.weights[f][c][i] = (double*)malloc(sizeof(double) * 3);
-                for (int j = 0; j < 3; j++) {
-                    conv_layer.weights[f][c][i][j] = (i % 2 == 0) ? 0.5 : 0.0;
-                }
-            }
-        }
-    }
-
-    MaxPool2DLayer pool_layer = {2};
-
-    FullyConnected1Layer fc1_layer = {FC1_INPUT_SIZE, FC1_SIZE, NULL, NULL};
-    fc1_layer.weights = (double**)malloc(sizeof(double*) * FC1_INPUT_SIZE);
-    for (int i = 0; i < FC1_INPUT_SIZE; i++) {
-        fc1_layer.weights[i] = (double*)malloc(sizeof(double) * FC1_SIZE);
-        for (int j = 0; j < FC1_SIZE; j++) {
-            fc1_layer.weights[i][j] = (i % 2 == 0) ? 0.5 : 0.0;
-        }
-    }
-    fc1_layer.bias = (double*)malloc(sizeof(double) * FC1_SIZE);
-    for (int j = 0; j < FC1_SIZE; j++) {
-        fc1_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
-    }
-
-    FullyConnected2Layer fc2_layer = {FC1_SIZE, FC2_SIZE, NULL, NULL};
-    fc2_layer.weights = (double**)malloc(sizeof(double*) * FC1_SIZE);
-    for (int i = 0; i < FC1_SIZE; i++) {
-        fc2_layer.weights[i] = (double*)malloc(sizeof(double) * FC2_SIZE);
-        for (int j = 0; j < FC2_SIZE; j++) {
-            fc2_layer.weights[i][j] = (i % 2 == 0) ? 0.5 : 0.0;
-        }
-    }
-    fc2_layer.bias = (double*)malloc(sizeof(double) * FC2_SIZE);
-    for (int j = 0; j < FC2_SIZE; j++) {
-        fc2_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
-    }
-
-    sem_init(&sem, 1, 1); // 1: 프로세스 간 공유 세마포어
-
-    int current_stream = 0;
-    pid_t children[NUM_CHILDREN];
-
-    for (int c = 0; c < NUM_CHILDREN; c++) {
+    for (int idx = 0; idx < NUM_INPUTS; idx++) {
         pid_t pid = fork();
         if (pid == 0) {
-            while (1) {
-                int my_stream;
-                sem_wait(&sem);
-                if (current_stream < NUM_STREAMS) {
-                    my_stream = current_stream;
-                    current_stream++;
-                    sem_post(&sem);
-                } else {
-                    sem_post(&sem);
-                    break;
-                }
+            int stream_id = idx + 1;
+            pid_t child_pid = getpid();
 
-                process_stream(my_stream + 1, input_streams[my_stream], &conv_layer, &pool_layer, &fc1_layer, &fc2_layer);
-            }
+            double (*input)[SIZE][SIZE] = mmap(NULL, sizeof(double) * 3 * SIZE * SIZE,
+                                               PROT_READ | PROT_WRITE,
+                                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            double (*conv_output)[VALID_SIZE][VALID_SIZE] = mmap(NULL, sizeof(double) * 16 * VALID_SIZE * VALID_SIZE,
+                                                                 PROT_READ | PROT_WRITE,
+                                                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            double (*pool_output)[POOL_SIZE][POOL_SIZE] = mmap(NULL, sizeof(double) * 16 * POOL_SIZE * POOL_SIZE,
+                                                               PROT_READ | PROT_WRITE,
+                                                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            double* flatten_output = mmap(NULL, sizeof(double) * FC1_INPUT_SIZE,
+                                          PROT_READ | PROT_WRITE,
+                                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            double* fc1_output = mmap(NULL, sizeof(double) * FC1_SIZE,
+                                      PROT_READ | PROT_WRITE,
+                                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            double* fc2_output = mmap(NULL, sizeof(double) * FC2_SIZE,
+                                      PROT_READ | PROT_WRITE,
+                                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+            init_input(input, idx + 1);
+
+            sem_wait(&shared->conv_sem);
+            conv2d_forward(&shared->conv_layer, input, conv_output);
+            relu_forward(conv_output);
+            sem_post(&shared->conv_sem);
+
+            sem_wait(&shared->pool_sem);
+            maxpool2d_forward(&shared->pool_layer, conv_output, pool_output);
+            flatten_forward(pool_output, flatten_output);
+            sem_post(&shared->pool_sem);
+
+            sem_wait(&shared->fc1_sem);
+            fc1_forward(&shared->fc1_layer, flatten_output, fc1_output);
+            sem_post(&shared->fc1_sem);
+
+            sem_wait(&shared->fc2_sem);
+            fc2_forward(&shared->fc2_layer, fc1_output, fc2_output);
+            sem_post(&shared->fc2_sem);
+
+            printf("===== [PID %d] Finished input stream #%d =====\n", child_pid, stream_id);
+            fflush(stdout);
+
+            printf("Conv2D output sample: ");
+            for (int i = 0; i < 5; i++) printf("%.5f ", conv_output[0][0][i]);
+            printf("\n");
+
+            printf("FC1 output sample: ");
+            for (int i = 0; i < 5; i++) printf("%.5f ", fc1_output[i]);
+            printf("\n");
+
+            printf("FC2 output sample: ");
+            for (int i = 0; i < 5; i++) printf("%.5f ", fc2_output[i]);
+            printf("\n\n");
+
+            if (idx == NUM_INPUTS - 1)
+                print_resource_usage();
+
             exit(0);
-        } else {
-            children[c] = pid;
         }
     }
 
-    for (int c = 0; c < NUM_CHILDREN; c++) {
-        waitpid(children[c], NULL, 0);
-    }
-
-    sem_destroy(&sem);
-
+    for (int i = 0; i < NUM_INPUTS; i++) wait(NULL);
     return 0;
 }
