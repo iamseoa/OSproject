@@ -26,7 +26,13 @@ typedef struct {
 void print_resource_usage() {
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
-    printf("Max RSS: %ld KB\n", usage.ru_maxrss);
+
+    printf("\n=== Resource Usage ===\n");
+    printf("Max RSS (memory): %ld KB\n", usage.ru_maxrss);
+    printf("Voluntary Context Switches: %ld\n", usage.ru_nvcsw);
+    printf("Involuntary Context Switches: %ld\n", usage.ru_nivcsw);
+    printf("Minor Page Faults: %ld\n", usage.ru_minflt);
+    printf("Major Page Faults: %ld\n", usage.ru_majflt);
 }
 
 void* shared_alloc(size_t size) {
