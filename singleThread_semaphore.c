@@ -1,12 +1,14 @@
 #include "layers.h"
 #include <sys/resource.h>
 #include <pthread.h>
+#include <unistd.h>
 #include <semaphore.h>
 
 #define NUM_INPUTS 9
 
+sem_t print_sem;
+
 double input_streams[NUM_INPUTS][3][SIZE][SIZE] = {0};
-sem_t sem;
 
 void init_input_streams() {
     for (int n = 0; n < NUM_INPUTS; n++)
@@ -28,12 +30,58 @@ void print_resource_usage() {
     printf("Major Page Faults: %ld\n", usage.ru_majflt);
 }
 
+typedef struct {
+    int idx;
+    Conv2DLayer* conv_layer;
+    MaxPool2DLayer* pool_layer;
+    FullyConnected1Layer* fc1_layer;
+    FullyConnected2Layer* fc2_layer;
+} ThreadArgs;
+
+void* process_input(void* arg) {
+    ThreadArgs* args = (ThreadArgs*)arg;
+    int idx = args->idx;
+    pid_t pid = getpid();
+
+    double (*conv_output)[VALID_SIZE][VALID_SIZE] = malloc(sizeof(double) * 16 * VALID_SIZE * VALID_SIZE);
+    double (*pool_output)[POOL_SIZE][POOL_SIZE] = malloc(sizeof(double) * 16 * POOL_SIZE * POOL_SIZE);
+    double* flatten_output = (double*)malloc(sizeof(double) * FC1_INPUT_SIZE);
+    double* fc1_output = (double*)malloc(sizeof(double) * FC1_SIZE);
+    double* fc2_output = (double*)malloc(sizeof(double) * FC2_SIZE);
+
+    conv2d_forward(args->conv_layer, input_streams[idx], conv_output);
+    relu_forward(conv_output);
+    maxpool2d_forward(args->pool_layer, conv_output, pool_output);
+    flatten_forward(pool_output, flatten_output);
+    fc1_forward(args->fc1_layer, flatten_output, fc1_output);
+    fc2_forward(args->fc2_layer, fc1_output, fc2_output);
+
+    sem_wait(&print_sem);
+    printf("\n===== [PID %d] Finished input stream #%d =====\n", pid, idx + 1);
+    printf("Conv2D output sample: ");
+    for (int i = 0; i < 5; i++) printf("%.5f ", conv_output[0][i][i]);
+    printf("\n");
+    printf("FC1 output sample: ");
+    for (int i = 0; i < 5; i++) printf("%.5f ", fc1_output[i]);
+    printf("\n");
+    printf("FC2 output sample: ");
+    for (int i = 0; i < 5; i++) printf("%.5f ", fc2_output[i]);
+    printf("\n");
+    sem_post(&print_sem);
+
+    free(flatten_output);
+    free(fc1_output);
+    free(fc2_output);
+    free(conv_output);
+    free(pool_output);
+    free(arg);
+    pthread_exit(NULL);
+}
+
 int main() {
     init_input_streams();
+    sem_init(&print_sem, 0, 1);
 
-    sem_init(&sem, 0, 1); // 세마포어 초기화 (초기값 1: 1개만 접근 허용)
-
-    // Layer 초기화
     Conv2DLayer conv_layer;
     conv_layer.in_channels = 3;
     conv_layer.out_channels = 16;
@@ -80,45 +128,24 @@ int main() {
     for (int j = 0; j < FC2_SIZE; j++)
         fc2_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
 
-    double (*conv_output)[VALID_SIZE][VALID_SIZE] = malloc(sizeof(double) * 16 * VALID_SIZE * VALID_SIZE);
-    double (*pool_output)[POOL_SIZE][POOL_SIZE] = malloc(sizeof(double) * 16 * POOL_SIZE * POOL_SIZE);
-    double* flatten_output = (double*)malloc(sizeof(double) * FC1_INPUT_SIZE);
-    double* fc1_output = (double*)malloc(sizeof(double) * FC1_SIZE);
-    double* fc2_output = (double*)malloc(sizeof(double) * FC2_SIZE);
+    pthread_t threads[NUM_INPUTS];
 
-    if (!conv_output || !pool_output || !flatten_output || !fc1_output || !fc2_output) {
-        printf("Memory allocation failed!\n");
-        return -1;
+    for (int i = 0; i < NUM_INPUTS; i++) {
+        ThreadArgs* args = malloc(sizeof(ThreadArgs));
+        args->idx = i;
+        args->conv_layer = &conv_layer;
+        args->pool_layer = &pool_layer;
+        args->fc1_layer = &fc1_layer;
+        args->fc2_layer = &fc2_layer;
+        pthread_create(&threads[i], NULL, process_input, args);
     }
 
-    printf("\n===== Start processing all input streams in single thread (with semaphore) =====\n");
-
-    for (int idx = 0; idx < NUM_INPUTS; idx++) {
-        sem_wait(&sem);  // 🔥 세마포어 wait (lock)
-
-        printf("\n[Input #%d]\n", idx + 1);
-
-        conv2d_forward(&conv_layer, input_streams[idx], conv_output);
-        relu_forward(conv_output);
-        maxpool2d_forward(&pool_layer, conv_output, pool_output);
-        flatten_forward(pool_output, flatten_output);
-        fc1_forward(&fc1_layer, flatten_output, fc1_output);
-        fc2_forward(&fc2_layer, fc1_output, fc2_output);
-
-        printf("FC2 output sample: ");
-        for (int i = 0; i < 5; i++) printf("%.5f ", fc2_output[i]);
-        printf("\n");
-
-        sem_post(&sem);  // 🔥 세마포어 post (unlock)
+    for (int i = 0; i < NUM_INPUTS; i++) {
+        pthread_join(threads[i], NULL);
     }
 
     print_resource_usage();
-
-    free(flatten_output);
-    free(fc1_output);
-    free(fc2_output);
-    free(conv_output);
-    free(pool_output);
+    sem_destroy(&print_sem);
 
     for (int f = 0; f < conv_layer.out_channels; f++) {
         for (int c = 0; c < conv_layer.in_channels; c++) {
@@ -140,8 +167,6 @@ int main() {
         free(fc2_layer.weights[i]);
     free(fc2_layer.weights);
     free(fc2_layer.bias);
-
-    sem_destroy(&sem); // 세마포어 제거
 
     return 0;
 }
