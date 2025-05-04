@@ -4,6 +4,7 @@
 #include <semaphore.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <string.h>
 #include "layers.h"
 
 #define NUM_INPUTS 9
@@ -20,26 +21,25 @@ typedef struct {
     sem_t fc2_sem;
 } SharedLayers;
 
-void* shared_alloc(size_t size) {
-    void* ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (ptr == MAP_FAILED) {
-        perror("mmap failed");
-        exit(1);
-    }
-    return ptr;
-}
-
 void print_resource_usage() {
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
 
-    printf("=== Resource Usage ===\n");
+    printf("\n=== Resource Usage ===\n");
     printf("Max RSS (memory): %ld KB\n", usage.ru_maxrss);
     printf("Voluntary Context Switches: %ld\n", usage.ru_nvcsw);
     printf("Involuntary Context Switches: %ld\n", usage.ru_nivcsw);
     printf("Minor Page Faults: %ld\n", usage.ru_minflt);
     printf("Major Page Faults: %ld\n", usage.ru_majflt);
+}
+
+void* shared_alloc(size_t size) {
+    void* ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (ptr == MAP_FAILED) {
+        perror("mmap failed");
+        exit(1);
+    }
+    return ptr;
 }
 
 void init_input(double input[3][SIZE][SIZE], int val) {
@@ -58,7 +58,6 @@ void init_shared_layers(SharedLayers* shared) {
     shared->conv_layer.in_channels = 3;
     shared->conv_layer.out_channels = 16;
     shared->conv_layer.kernel_size = 3;
-
     shared->conv_layer.weights = shared_alloc(sizeof(double***) * 16);
     for (int f = 0; f < 16; f++) {
         shared->conv_layer.weights[f] = shared_alloc(sizeof(double**) * 3);
@@ -67,7 +66,7 @@ void init_shared_layers(SharedLayers* shared) {
             for (int i = 0; i < 3; i++) {
                 shared->conv_layer.weights[f][c][i] = shared_alloc(sizeof(double) * 3);
                 for (int j = 0; j < 3; j++)
-                    shared->conv_layer.weights[f][c][i][j] = (i % 2 == 0) ? 0.5 : 0.0;
+                    shared->conv_layer.weights[f][c][i][j] = 0.5;
             }
         }
     }
@@ -78,11 +77,11 @@ void init_shared_layers(SharedLayers* shared) {
     for (int i = 0; i < FC1_INPUT_SIZE; i++) {
         shared->fc1_layer.weights[i] = shared_alloc(sizeof(double) * FC1_SIZE);
         for (int j = 0; j < FC1_SIZE; j++)
-            shared->fc1_layer.weights[i][j] = (i % 2 == 0) ? 0.5 : 0.0;
+            shared->fc1_layer.weights[i][j] = 0.5;
     }
     shared->fc1_layer.bias = shared_alloc(sizeof(double) * FC1_SIZE);
     for (int j = 0; j < FC1_SIZE; j++)
-        shared->fc1_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
+        shared->fc1_layer.bias[j] = 0.5;
 
     shared->fc2_layer.input_size = FC1_SIZE;
     shared->fc2_layer.output_size = FC2_SIZE;
@@ -90,11 +89,11 @@ void init_shared_layers(SharedLayers* shared) {
     for (int i = 0; i < FC1_SIZE; i++) {
         shared->fc2_layer.weights[i] = shared_alloc(sizeof(double) * FC2_SIZE);
         for (int j = 0; j < FC2_SIZE; j++)
-            shared->fc2_layer.weights[i][j] = (i % 2 == 0) ? 0.5 : 0.0;
+            shared->fc2_layer.weights[i][j] = 0.5;
     }
     shared->fc2_layer.bias = shared_alloc(sizeof(double) * FC2_SIZE);
     for (int j = 0; j < FC2_SIZE; j++)
-        shared->fc2_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
+        shared->fc2_layer.bias[j] = 0.5;
 
     shared->pool_layer.pool_size = 2;
 }
