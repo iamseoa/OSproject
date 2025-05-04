@@ -1,19 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <string.h>
 #include <pthread.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <sys/wait.h>
-#include <sys/resource.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #include "layers.h"
 
 #define NUM_INPUTS 9
 
 pthread_mutex_t *conv_mutex, *pool_mutex, *fc1_mutex, *fc2_mutex;
 
+// Shared memory data
 double (*input_streams)[3][SIZE][SIZE];
 double ****conv_weights;
 double **fc1_weights, *fc1_bias;
@@ -39,55 +37,74 @@ void init_input_streams() {
 }
 
 void init_weights() {
-    conv_weights = mmap(NULL, sizeof(double***) * 16, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    conv_weights = mmap(NULL, sizeof(double***) * 16, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int f = 0; f < 16; f++) {
-        conv_weights[f] = mmap(NULL, sizeof(double**) * 3, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        conv_weights[f] = mmap(NULL, sizeof(double**) * 3, PROT_READ | PROT_WRITE,
+                               MAP_SHARED | MAP_ANONYMOUS, -1, 0);
         for (int c = 0; c < 3; c++) {
-            conv_weights[f][c] = mmap(NULL, sizeof(double*) * 3, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+            conv_weights[f][c] = mmap(NULL, sizeof(double*) * 3, PROT_READ | PROT_WRITE,
+                                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
             for (int i = 0; i < 3; i++) {
-                conv_weights[f][c][i] = mmap(NULL, sizeof(double) * 3, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+                conv_weights[f][c][i] = mmap(NULL, sizeof(double) * 3, PROT_READ | PROT_WRITE,
+                                             MAP_SHARED | MAP_ANONYMOUS, -1, 0);
                 for (int j = 0; j < 3; j++)
                     conv_weights[f][c][i][j] = 0.5;
             }
         }
     }
 
-    fc1_weights = mmap(NULL, sizeof(double*) * FC1_INPUT_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc1_weights = mmap(NULL, sizeof(double*) * FC1_INPUT_SIZE, PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int i = 0; i < FC1_INPUT_SIZE; i++) {
-        fc1_weights[i] = mmap(NULL, sizeof(double) * FC1_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        fc1_weights[i] = mmap(NULL, sizeof(double) * FC1_SIZE, PROT_READ | PROT_WRITE,
+                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
         for (int j = 0; j < FC1_SIZE; j++)
             fc1_weights[i][j] = 0.5;
     }
-    fc1_bias = mmap(NULL, sizeof(double) * FC1_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc1_bias = mmap(NULL, sizeof(double) * FC1_SIZE, PROT_READ | PROT_WRITE,
+                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int j = 0; j < FC1_SIZE; j++) fc1_bias[j] = 0.5;
 
-    fc2_weights = mmap(NULL, sizeof(double*) * FC1_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc2_weights = mmap(NULL, sizeof(double*) * FC1_SIZE, PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int i = 0; i < FC1_SIZE; i++) {
-        fc2_weights[i] = mmap(NULL, sizeof(double) * FC2_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        fc2_weights[i] = mmap(NULL, sizeof(double) * FC2_SIZE, PROT_READ | PROT_WRITE,
+                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
         for (int j = 0; j < FC2_SIZE; j++)
             fc2_weights[i][j] = 0.5;
     }
-    fc2_bias = mmap(NULL, sizeof(double) * FC2_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc2_bias = mmap(NULL, sizeof(double) * FC2_SIZE, PROT_READ | PROT_WRITE,
+                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int j = 0; j < FC2_SIZE; j++) fc2_bias[j] = 0.5;
 }
 
-int main() {
-    input_streams = mmap(NULL, sizeof(double) * NUM_INPUTS * 3 * SIZE * SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    init_input_streams();
-    init_weights();
-
-    conv_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    pool_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    fc1_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    fc2_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-
+void init_mutexes() {
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+
+    conv_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE,
+                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    pool_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE,
+                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc1_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE,
+                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc2_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE,
+                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
     pthread_mutex_init(conv_mutex, &attr);
     pthread_mutex_init(pool_mutex, &attr);
     pthread_mutex_init(fc1_mutex, &attr);
     pthread_mutex_init(fc2_mutex, &attr);
+}
+
+int main() {
+    input_streams = mmap(NULL, sizeof(double) * NUM_INPUTS * 3 * SIZE * SIZE, PROT_READ | PROT_WRITE,
+                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    init_input_streams();
+    init_weights();
+    init_mutexes();
 
     pid_t pid = fork();
     if (pid == 0) {
