@@ -7,19 +7,21 @@
 #include <sys/shm.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 #include "layers.h"
 
 #define NUM_INPUTS 9
 
-pthread_mutex_t conv_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t fc1_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t fc2_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t *conv_mutex, *pool_mutex, *fc1_mutex, *fc2_mutex;
+
+double (*input_streams)[3][SIZE][SIZE];
+double ****conv_weights;
+double **fc1_weights, *fc1_bias;
+double **fc2_weights, *fc2_bias;
 
 void print_resource_usage() {
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
-
     printf("\n=== Resource Usage ===\n");
     printf("Max RSS (memory): %ld KB\n", usage.ru_maxrss);
     printf("Voluntary Context Switches: %ld\n", usage.ru_nvcsw);
@@ -28,7 +30,7 @@ void print_resource_usage() {
     printf("Major Page Faults: %ld\n", usage.ru_majflt);
 }
 
-void init_input_streams(double input_streams[NUM_INPUTS][3][SIZE][SIZE]) {
+void init_input_streams() {
     for (int n = 0; n < NUM_INPUTS; n++)
         for (int c = 0; c < 3; c++)
             for (int i = 0; i < SIZE; i++)
@@ -36,47 +38,59 @@ void init_input_streams(double input_streams[NUM_INPUTS][3][SIZE][SIZE]) {
                     input_streams[n][c][i][j] = (double)(n + 1);
 }
 
-int main() {
-    // Shared memory setup
-    int input_shmid = shmget(IPC_PRIVATE, sizeof(double) * NUM_INPUTS * 3 * SIZE * SIZE, IPC_CREAT | 0666);
-    double (*input_streams)[3][SIZE][SIZE] = shmat(input_shmid, NULL, 0);
-    init_input_streams(input_streams);
-
-    // Weight, bias allocation (local to parent)
-    double ****conv_weights = malloc(sizeof(double***) * 16);
+void init_weights() {
+    conv_weights = mmap(NULL, sizeof(double***) * 16, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int f = 0; f < 16; f++) {
-        conv_weights[f] = malloc(sizeof(double**) * 3);
+        conv_weights[f] = mmap(NULL, sizeof(double**) * 3, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
         for (int c = 0; c < 3; c++) {
-            conv_weights[f][c] = malloc(sizeof(double*) * 3);
+            conv_weights[f][c] = mmap(NULL, sizeof(double*) * 3, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
             for (int i = 0; i < 3; i++) {
-                conv_weights[f][c][i] = malloc(sizeof(double) * 3);
+                conv_weights[f][c][i] = mmap(NULL, sizeof(double) * 3, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
                 for (int j = 0; j < 3; j++)
                     conv_weights[f][c][i][j] = 0.5;
             }
         }
     }
 
-    double **fc1_weights = malloc(sizeof(double*) * FC1_INPUT_SIZE);
+    fc1_weights = mmap(NULL, sizeof(double*) * FC1_INPUT_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int i = 0; i < FC1_INPUT_SIZE; i++) {
-        fc1_weights[i] = malloc(sizeof(double) * FC1_SIZE);
+        fc1_weights[i] = mmap(NULL, sizeof(double) * FC1_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
         for (int j = 0; j < FC1_SIZE; j++)
             fc1_weights[i][j] = 0.5;
     }
-    double *fc1_bias = malloc(sizeof(double) * FC1_SIZE);
+    fc1_bias = mmap(NULL, sizeof(double) * FC1_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int j = 0; j < FC1_SIZE; j++) fc1_bias[j] = 0.5;
 
-    double **fc2_weights = malloc(sizeof(double*) * FC1_SIZE);
+    fc2_weights = mmap(NULL, sizeof(double*) * FC1_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int i = 0; i < FC1_SIZE; i++) {
-        fc2_weights[i] = malloc(sizeof(double) * FC2_SIZE);
+        fc2_weights[i] = mmap(NULL, sizeof(double) * FC2_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
         for (int j = 0; j < FC2_SIZE; j++)
             fc2_weights[i][j] = 0.5;
     }
-    double *fc2_bias = malloc(sizeof(double) * FC2_SIZE);
+    fc2_bias = mmap(NULL, sizeof(double) * FC2_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int j = 0; j < FC2_SIZE; j++) fc2_bias[j] = 0.5;
+}
+
+int main() {
+    input_streams = mmap(NULL, sizeof(double) * NUM_INPUTS * 3 * SIZE * SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    init_input_streams();
+    init_weights();
+
+    conv_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    pool_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc1_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc2_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(conv_mutex, &attr);
+    pthread_mutex_init(pool_mutex, &attr);
+    pthread_mutex_init(fc1_mutex, &attr);
+    pthread_mutex_init(fc2_mutex, &attr);
 
     pid_t pid = fork();
     if (pid == 0) {
-        // Child process
         Conv2DLayer conv_layer = {3, 16, 3, conv_weights};
         MaxPool2DLayer pool_layer = {2};
         FullyConnected1Layer fc1_layer = {FC1_INPUT_SIZE, FC1_SIZE, fc1_weights, fc1_bias};
@@ -89,25 +103,25 @@ int main() {
         double* fc2_output = malloc(sizeof(double) * FC2_SIZE);
 
         for (int idx = 0; idx < NUM_INPUTS; idx++) {
-            pthread_mutex_lock(&conv_mutex);
+            pthread_mutex_lock(conv_mutex);
             conv2d_forward(&conv_layer, input_streams[idx], conv_output);
             relu_forward(conv_output);
-            pthread_mutex_unlock(&conv_mutex);
+            pthread_mutex_unlock(conv_mutex);
 
-            pthread_mutex_lock(&pool_mutex);
+            pthread_mutex_lock(pool_mutex);
             maxpool2d_forward(&pool_layer, conv_output, pool_output);
             flatten_forward(pool_output, flatten_output);
-            pthread_mutex_unlock(&pool_mutex);
+            pthread_mutex_unlock(pool_mutex);
 
-            pthread_mutex_lock(&fc1_mutex);
+            pthread_mutex_lock(fc1_mutex);
             fc1_forward(&fc1_layer, flatten_output, fc1_output);
-            pthread_mutex_unlock(&fc1_mutex);
+            pthread_mutex_unlock(fc1_mutex);
 
-            pthread_mutex_lock(&fc2_mutex);
+            pthread_mutex_lock(fc2_mutex);
             fc2_forward(&fc2_layer, fc1_output, fc2_output);
-            pthread_mutex_unlock(&fc2_mutex);
+            pthread_mutex_unlock(fc2_mutex);
 
-            printf("===== Finished input stream #%d =====\n", idx + 1);
+            printf("===== [PID %d] Finished input stream #%d =====\n", getpid(), idx + 1);
             printf("Conv2D output sample: ");
             for (int i = 0; i < 5; i++) printf("%.5f ", conv_output[0][0][i]);
             printf("\nFC1 output sample: ");
@@ -121,8 +135,6 @@ int main() {
         exit(0);
     } else {
         wait(NULL);
-        shmctl(input_shmid, IPC_RMID, NULL);
     }
-
     return 0;
 }
