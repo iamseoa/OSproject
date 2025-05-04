@@ -20,7 +20,6 @@ void init_input_streams(double input_streams[NUM_INPUTS][3][SIZE][SIZE]) {
 void print_resource_usage() {
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
-
     printf("\n=== Resource Usage ===\n");
     printf("Max RSS (memory): %ld KB\n", usage.ru_maxrss);
     printf("Voluntary Context Switches: %ld\n", usage.ru_nvcsw);
@@ -30,7 +29,7 @@ void print_resource_usage() {
 }
 
 int main() {
-    // === [1] 공유 메모리 생성 ===
+    // Shared memory setup
     int input_shmid = shmget(IPC_PRIVATE, sizeof(double) * NUM_INPUTS * 3 * SIZE * SIZE, IPC_CREAT | 0666);
     double (*input_streams)[3][SIZE][SIZE] = shmat(input_shmid, NULL, 0);
     init_input_streams(input_streams);
@@ -65,10 +64,9 @@ int main() {
     for (int j = 0; j < FC2_SIZE; j++)
         fc2_bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
 
-    // === [2] 자식 프로세스 생성 ===
     pid_t pid = fork();
     if (pid == 0) {
-        // === [2-1] Conv2DLayer 재구성 ===
+        // child process
         double ****conv_weights = malloc(sizeof(double***) * 16);
         for (int f = 0; f < 16; f++) {
             conv_weights[f] = malloc(sizeof(double**) * 3);
@@ -82,18 +80,12 @@ int main() {
         Conv2DLayer conv_layer = {3, 16, 3, conv_weights};
         MaxPool2DLayer pool_layer = {2};
 
-        FullyConnected1Layer fc1_layer;
-        fc1_layer.input_size = FC1_INPUT_SIZE;
-        fc1_layer.output_size = FC1_SIZE;
-        fc1_layer.bias = fc1_bias;
+        FullyConnected1Layer fc1_layer = {FC1_INPUT_SIZE, FC1_SIZE, NULL, fc1_bias};
         fc1_layer.weights = malloc(sizeof(double*) * FC1_INPUT_SIZE);
         for (int i = 0; i < FC1_INPUT_SIZE; i++)
             fc1_layer.weights[i] = &fc1_raw[i * FC1_SIZE];
 
-        FullyConnected2Layer fc2_layer;
-        fc2_layer.input_size = FC1_SIZE;
-        fc2_layer.output_size = FC2_SIZE;
-        fc2_layer.bias = fc2_bias;
+        FullyConnected2Layer fc2_layer = {FC1_SIZE, FC2_SIZE, NULL, fc2_bias};
         fc2_layer.weights = malloc(sizeof(double*) * FC1_SIZE);
         for (int i = 0; i < FC1_SIZE; i++)
             fc2_layer.weights[i] = &fc2_raw[i * FC2_SIZE];
@@ -112,8 +104,17 @@ int main() {
             fc1_forward(&fc1_layer, flatten_output, fc1_output);
             fc2_forward(&fc2_layer, fc1_output, fc2_output);
 
-            printf("FC2 output #%d: ", idx + 1);
-            for (int i = 0; i < 5; i++) printf("%.4f ", fc2_output[i]);
+            printf("\n===== Finished input stream #%d =====\n", idx + 1);
+            printf("Conv2D output sample: ");
+            for (int i = 0; i < 5; i++) printf("%.5f ", conv_output[0][i][i]);
+            printf("\n");
+
+            printf("FC1 output sample: ");
+            for (int i = 0; i < 5; i++) printf("%.5f ", fc1_output[i]);
+            printf("\n");
+
+            printf("FC2 output sample: ");
+            for (int i = 0; i < 5; i++) printf("%.5f ", fc2_output[i]);
             printf("\n");
         }
 
@@ -123,7 +124,6 @@ int main() {
         wait(NULL);
     }
 
-    // === [3] 공유 메모리 해제 ===
     shmctl(input_shmid, IPC_RMID, NULL);
     shmctl(conv_weight_shmid, IPC_RMID, NULL);
     shmctl(fc1_weight_shmid, IPC_RMID, NULL);
