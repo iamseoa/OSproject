@@ -5,22 +5,15 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
-#include <string.h>
 #include "layers.h"
 
 #define NUM_INPUTS 9
 
-sem_t *conv_sem;
-sem_t *pool_sem;
-sem_t *fc1_sem;
-sem_t *fc2_sem;
-
+sem_t *conv_sem, *pool_sem, *fc1_sem, *fc2_sem;
 double (*input_streams)[3][SIZE][SIZE];
 double ****conv_weights;
-double **fc1_weights;
-double *fc1_bias;
-double **fc2_weights;
-double *fc2_bias;
+double **fc1_weights, *fc1_bias;
+double **fc2_weights, *fc2_bias;
 
 void print_resource_usage() {
     struct rusage usage;
@@ -75,8 +68,7 @@ void init_weights() {
 }
 
 int main() {
-    input_streams = mmap(NULL, sizeof(double) * NUM_INPUTS * 3 * SIZE * SIZE, PROT_READ | PROT_WRITE,
-                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    input_streams = mmap(NULL, sizeof(double) * NUM_INPUTS * 3 * SIZE * SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     init_input_streams();
     init_weights();
 
@@ -97,11 +89,11 @@ int main() {
         FullyConnected1Layer fc1_layer = {FC1_INPUT_SIZE, FC1_SIZE, fc1_weights, fc1_bias};
         FullyConnected2Layer fc2_layer = {FC1_SIZE, FC2_SIZE, fc2_weights, fc2_bias};
 
-        double (*conv_output)[VALID_SIZE][VALID_SIZE] = malloc(sizeof(double) * 16 * VALID_SIZE * VALID_SIZE);
-        double (*pool_output)[POOL_SIZE][POOL_SIZE] = malloc(sizeof(double) * 16 * POOL_SIZE * POOL_SIZE);
-        double* flatten_output = malloc(sizeof(double) * FC1_INPUT_SIZE);
-        double* fc1_output = malloc(sizeof(double) * FC1_SIZE);
-        double* fc2_output = malloc(sizeof(double) * FC2_SIZE);
+        double conv_output[16][VALID_SIZE][VALID_SIZE];
+        double pool_output[16][POOL_SIZE][POOL_SIZE];
+        double *flatten_output = malloc(sizeof(double) * FC1_INPUT_SIZE);
+        double *fc1_output = malloc(sizeof(double) * FC1_SIZE);
+        double *fc2_output = malloc(sizeof(double) * FC2_SIZE);
 
         for (int idx = 0; idx < NUM_INPUTS; idx++) {
             sem_wait(conv_sem);
@@ -131,7 +123,6 @@ int main() {
             for (int i = 0; i < 5; i++) printf("%.5f ", fc2_output[i]);
             printf("\n\n");
         }
-
         print_resource_usage();
         exit(0);
     } else {
