@@ -32,7 +32,7 @@ void print_resource_usage() {
 int main() {
     init_input_streams();
 
-    // Conv2D
+    // Conv2D weights
     Conv2DLayer conv_layer;
     conv_layer.in_channels = 3;
     conv_layer.out_channels = 16;
@@ -50,10 +50,8 @@ int main() {
         }
     }
 
-    // MaxPool2D
     MaxPool2DLayer pool_layer = {2};
 
-    // FC1
     FullyConnected1Layer fc1_layer;
     fc1_layer.input_size = FC1_INPUT_SIZE;
     fc1_layer.output_size = FC1_SIZE;
@@ -67,7 +65,6 @@ int main() {
     for (int j = 0; j < FC1_SIZE; j++)
         fc1_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
 
-    // FC2
     FullyConnected2Layer fc2_layer;
     fc2_layer.input_size = FC1_SIZE;
     fc2_layer.output_size = FC2_SIZE;
@@ -81,11 +78,9 @@ int main() {
     for (int j = 0; j < FC2_SIZE; j++)
         fc2_layer.bias[j] = (j % 2 == 0) ? 0.5 : 0.0;
 
-    // fork for child process
     pid_t pid = fork();
 
     if (pid == 0) {
-        // child
         double (*conv_output)[VALID_SIZE][VALID_SIZE] = malloc(sizeof(double) * 16 * VALID_SIZE * VALID_SIZE);
         double (*pool_output)[POOL_SIZE][POOL_SIZE] = malloc(sizeof(double) * 16 * POOL_SIZE * POOL_SIZE);
         double* flatten_output = malloc(sizeof(double) * FC1_INPUT_SIZE);
@@ -100,8 +95,17 @@ int main() {
             fc1_forward(&fc1_layer, flatten_output, fc1_output);
             fc2_forward(&fc2_layer, fc1_output, fc2_output);
 
-            printf("FC2 output #%d: ", idx + 1);
-            for (int i = 0; i < 5; i++) printf("%.4f ", fc2_output[i]);
+            printf("\n===== Finished input stream #%d =====\n", idx + 1);
+            printf("Conv2D output sample: ");
+            for (int i = 0; i < 5; i++) printf("%.5f ", conv_output[0][i][i]);
+            printf("\n");
+
+            printf("FC1 output sample: ");
+            for (int i = 0; i < 5; i++) printf("%.5f ", fc1_output[i]);
+            printf("\n");
+
+            printf("FC2 output sample: ");
+            for (int i = 0; i < 5; i++) printf("%.5f ", fc2_output[i]);
             printf("\n");
         }
 
@@ -114,14 +118,12 @@ int main() {
         free(pool_output);
         exit(0);
     } else if (pid > 0) {
-        // parent
         wait(NULL);
     } else {
         perror("fork failed");
         return -1;
     }
 
-    // Free weights
     for (int f = 0; f < conv_layer.out_channels; f++) {
         for (int c = 0; c < conv_layer.in_channels; c++) {
             for (int i = 0; i < 3; i++)
