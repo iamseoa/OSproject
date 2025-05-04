@@ -14,8 +14,9 @@ sem_t *conv_sem, *pool_sem, *fc1_sem, *fc2_sem;
 
 double (*input_streams)[3][SIZE][SIZE];
 double ****conv_weights;
-double **fc1_weights, *fc1_bias;
-double **fc2_weights, *fc2_bias;
+
+double **fc1_weights, *fc1_bias, *fc1_raw;
+double **fc2_weights, *fc2_bias, *fc2_raw;
 
 void print_resource_usage() {
     struct rusage usage;
@@ -37,7 +38,7 @@ void init_input_streams() {
 }
 
 void init_weights() {
-    // Conv2D Weights
+    // Conv2D weights
     conv_weights = mmap(NULL, sizeof(double***) * 16, PROT_READ | PROT_WRITE,
                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int f = 0; f < 16; f++) {
@@ -56,40 +57,44 @@ void init_weights() {
     }
 
     // FC1
-    fc1_weights = mmap(NULL, sizeof(double*) * FC1_INPUT_SIZE, PROT_READ | PROT_WRITE,
-                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    for (int i = 0; i < FC1_INPUT_SIZE; i++) {
-        fc1_weights[i] = mmap(NULL, sizeof(double) * FC1_SIZE, PROT_READ | PROT_WRITE,
-                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc1_raw = mmap(NULL, sizeof(double) * FC1_INPUT_SIZE * FC1_SIZE,
+                   PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc1_weights = malloc(sizeof(double*) * FC1_INPUT_SIZE);
+    for (int i = 0; i < FC1_INPUT_SIZE; i++)
+        fc1_weights[i] = &fc1_raw[i * FC1_SIZE];
+
+    for (int i = 0; i < FC1_INPUT_SIZE; i++)
         for (int j = 0; j < FC1_SIZE; j++)
             fc1_weights[i][j] = 0.5;
-    }
+
     fc1_bias = mmap(NULL, sizeof(double) * FC1_SIZE, PROT_READ | PROT_WRITE,
                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int j = 0; j < FC1_SIZE; j++) fc1_bias[j] = 0.5;
 
     // FC2
-    fc2_weights = mmap(NULL, sizeof(double*) * FC1_SIZE, PROT_READ | PROT_WRITE,
-                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    for (int i = 0; i < FC1_SIZE; i++) {
-        fc2_weights[i] = mmap(NULL, sizeof(double) * FC2_SIZE, PROT_READ | PROT_WRITE,
-                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc2_raw = mmap(NULL, sizeof(double) * FC1_SIZE * FC2_SIZE,
+                   PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc2_weights = malloc(sizeof(double*) * FC1_SIZE);
+    for (int i = 0; i < FC1_SIZE; i++)
+        fc2_weights[i] = &fc2_raw[i * FC2_SIZE];
+
+    for (int i = 0; i < FC1_SIZE; i++)
         for (int j = 0; j < FC2_SIZE; j++)
             fc2_weights[i][j] = 0.5;
-    }
+
     fc2_bias = mmap(NULL, sizeof(double) * FC2_SIZE, PROT_READ | PROT_WRITE,
                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     for (int j = 0; j < FC2_SIZE; j++) fc2_bias[j] = 0.5;
 }
 
 int main() {
-    // Shared input + weight
+    // input
     input_streams = mmap(NULL, sizeof(double) * NUM_INPUTS * 3 * SIZE * SIZE, PROT_READ | PROT_WRITE,
                          MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     init_input_streams();
     init_weights();
 
-    // Semaphore init
+    // semaphores
     conv_sem = mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     pool_sem = mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     fc1_sem = mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -107,7 +112,7 @@ int main() {
         FullyConnected1Layer fc1_layer = {FC1_INPUT_SIZE, FC1_SIZE, fc1_weights, fc1_bias};
         FullyConnected2Layer fc2_layer = {FC1_SIZE, FC2_SIZE, fc2_weights, fc2_bias};
 
-        // Heap allocation to avoid segmentation fault
+        // Heap
         double (*conv_output)[VALID_SIZE][VALID_SIZE] = malloc(sizeof(double) * 16 * VALID_SIZE * VALID_SIZE);
         double (*pool_output)[POOL_SIZE][POOL_SIZE] = malloc(sizeof(double) * 16 * POOL_SIZE * POOL_SIZE);
         double* flatten_output = malloc(sizeof(double) * FC1_INPUT_SIZE);
