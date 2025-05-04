@@ -1,16 +1,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <string.h>
 #include <sys/mman.h>
-#include <pthread.h>
-#include <sys/resource.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
+#include <pthread.h>
 #include "layers.h"
 
 #define NUM_INPUTS 9
 
-// 공유 자원
+// 전역 공유 변수
 pthread_mutex_t *conv_mutex, *pool_mutex, *fc1_mutex, *fc2_mutex;
 double (*input_streams)[3][SIZE][SIZE];
 double ****conv_weights;
@@ -18,20 +17,12 @@ double **fc1_weights, *fc1_bias;
 double **fc2_weights, *fc2_bias;
 
 void* shared_alloc(size_t size) {
-    void* ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    void* ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (ptr == MAP_FAILED) {
         perror("mmap failed");
         exit(1);
     }
     return ptr;
-}
-
-void init_mutex(pthread_mutex_t *mutex) {
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-    pthread_mutex_init(mutex, &attr);
 }
 
 void init_input_streams() {
@@ -42,8 +33,15 @@ void init_input_streams() {
                     input_streams[n][c][i][j] = (double)(n + 1);
 }
 
+void init_mutex(pthread_mutex_t** mtx) {
+    *mtx = shared_alloc(sizeof(pthread_mutex_t));
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(*mtx, &attr);
+}
+
 void init_weights() {
-    // Conv
     conv_weights = shared_alloc(sizeof(double***) * 16);
     for (int f = 0; f < 16; f++) {
         conv_weights[f] = shared_alloc(sizeof(double**) * 3);
@@ -89,18 +87,13 @@ void print_resource_usage() {
 
 int main() {
     input_streams = shared_alloc(sizeof(double) * NUM_INPUTS * 3 * SIZE * SIZE);
-    conv_mutex = shared_alloc(sizeof(pthread_mutex_t));
-    pool_mutex = shared_alloc(sizeof(pthread_mutex_t));
-    fc1_mutex  = shared_alloc(sizeof(pthread_mutex_t));
-    fc2_mutex  = shared_alloc(sizeof(pthread_mutex_t));
-
-    init_mutex(conv_mutex);
-    init_mutex(pool_mutex);
-    init_mutex(fc1_mutex);
-    init_mutex(fc2_mutex);
-
     init_input_streams();
     init_weights();
+
+    init_mutex(&conv_mutex);
+    init_mutex(&pool_mutex);
+    init_mutex(&fc1_mutex);
+    init_mutex(&fc2_mutex);
 
     pid_t pid = fork();
     if (pid == 0) {
