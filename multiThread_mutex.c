@@ -10,7 +10,7 @@
 
 #define NUM_THREADS 9
 
-// CNN 레이어와 mutex 포함 구조체
+//    CNN 레이어와 mutex 포함 구조체
 typedef struct {
     Conv2DLayer conv;
     MaxPool2DLayer pool;
