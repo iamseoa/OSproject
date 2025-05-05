@@ -11,7 +11,6 @@
 
 #define NUM_THREADS 9
 
-// 구조체: CNN 레이어 + 세마포어들
 typedef struct {
     Conv2DLayer conv;
     MaxPool2DLayer pool;
@@ -23,15 +22,11 @@ typedef struct {
     sem_t sem_fc2;
 } SharedLayers;
 
-// 각 스레드에 전달할 구조체
 typedef struct {
     int id;
     SharedLayers* shared;
 } ThreadArgs;
 
-sem_t print_sems[NUM_THREADS]; // 출력 순서 제어용 세마포어 배열
-
-// 리소스 사용 출력
 void print_resource_usage() {
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
@@ -43,14 +38,12 @@ void print_resource_usage() {
     printf("Major Page Faults: %ld\n", usage.ru_majflt);
 }
 
-// 각 스레드 동작
 void* run_thread(void* arg) {
     ThreadArgs* args = (ThreadArgs*)arg;
     int id = args->id;
     SharedLayers* shared = args->shared;
     pid_t tid = syscall(SYS_gettid);
 
-    // 메모리 동적할당
     double (*input)[SIZE][SIZE] = malloc(sizeof(double) * 3 * SIZE * SIZE);
     double (*conv_out)[VALID_SIZE][VALID_SIZE] = malloc(sizeof(double) * 16 * VALID_SIZE * VALID_SIZE);
     double (*pool_out)[POOL_SIZE][POOL_SIZE] = malloc(sizeof(double) * 16 * POOL_SIZE * POOL_SIZE);
@@ -63,7 +56,6 @@ void* run_thread(void* arg) {
         pthread_exit(NULL);
     }
 
-    // 입력 초기화
     for (int c = 0; c < 3; c++)
         for (int i = 0; i < SIZE; i++)
             for (int j = 0; j < SIZE; j++)
@@ -87,7 +79,7 @@ void* run_thread(void* arg) {
     fc2_forward(&shared->fc2, fc1_out, fc2_out);
     sem_post(&shared->sem_fc2);
 
-    sem_wait(&print_sems[id - 1]); // 출력 순서 보장
+    // 즉시 출력
     printf("===== [PID %d] [TID %d] Finished input stream #%d =====\n", getpid(), tid, id);
     printf("Conv2D output sample: ");
     for (int i = 0; i < 5; i++) printf("%.4f ", conv_out[0][0][i]);
@@ -96,14 +88,11 @@ void* run_thread(void* arg) {
     printf("\nFC2 output sample: ");
     for (int i = 0; i < 5; i++) printf("%.4f ", fc2_out[i]);
     printf("\n\n");
-    if (id < NUM_THREADS)
-        sem_post(&print_sems[id]);
 
     free(input); free(conv_out); free(pool_out); free(flatten); free(fc1_out); free(fc2_out);
     pthread_exit(NULL);
 }
 
-// 레이어 및 세마포어 초기화
 void init_shared_layers(SharedLayers* s) {
     sem_init(&s->sem_conv, 0, 1);
     sem_init(&s->sem_pool, 0, 1);
@@ -157,9 +146,6 @@ int main() {
 
     pthread_t threads[NUM_THREADS];
     ThreadArgs* args[NUM_THREADS];
-
-    for (int i = 0; i < NUM_THREADS; i++)
-        sem_init(&print_sems[i], 0, (i == 0 ? 1 : 0)); // 첫 번째는 1, 나머지는 0으로 시작
 
     for (int i = 0; i < NUM_THREADS; i++) {
         args[i] = malloc(sizeof(ThreadArgs));

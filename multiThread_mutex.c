@@ -10,7 +10,7 @@
 
 #define NUM_THREADS 9
 
-// Structure containing all shared CNN layers and mutexes to protect concurrent access
+// CNN 레이어와 mutex 포함 구조체
 typedef struct {
     Conv2DLayer conv;
     MaxPool2DLayer pool;
@@ -22,16 +22,13 @@ typedef struct {
     pthread_mutex_t mutex_fc2;
 } SharedLayers;
 
-// Structure passed to each thread containing ID, shared layer access, and sync tools
+// 각 스레드에 전달할 구조체
 typedef struct {
     int id;
     SharedLayers* shared;
 } ThreadArgs;
 
-pthread_mutex_t print_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t print_cond = PTHREAD_COND_INITIALIZER;
-int current_turn = 1;
-
+// 리소스 사용 현황 출력
 void print_resource_usage() {
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
@@ -43,6 +40,7 @@ void print_resource_usage() {
     printf("Major Page Faults: %ld\n", usage.ru_majflt);
 }
 
+// 스레드 함수
 void* run_thread(void* arg) {
     ThreadArgs* args = (ThreadArgs*)arg;
     int id = args->id;
@@ -84,24 +82,15 @@ void* run_thread(void* arg) {
     fc2_forward(&shared->fc2, fc1_out, fc2_out);
     pthread_mutex_unlock(&shared->mutex_fc2);
 
-    pthread_mutex_lock(&print_mutex);
-    while (current_turn != id)
-        pthread_cond_wait(&print_cond, &print_mutex);
-
+    // 즉시 출력
     printf("===== [PID %d] [TID %d] Finished input stream #%d =====\n", getpid(), tid, id);
     printf("Conv2D output sample: ");
     for (int i = 0; i < 5; i++) printf("%.4f ", conv_out[0][0][i]);
-    printf("\n");
-    printf("FC1 output sample: ");
+    printf("\nFC1 output sample: ");
     for (int i = 0; i < 5; i++) printf("%.4f ", fc1_out[i]);
-    printf("\n");
-    printf("FC2 output sample: ");
+    printf("\nFC2 output sample: ");
     for (int i = 0; i < 5; i++) printf("%.4f ", fc2_out[i]);
     printf("\n\n");
-
-    current_turn++;
-    pthread_cond_broadcast(&print_cond);
-    pthread_mutex_unlock(&print_mutex);
 
     free(input);
     free(conv_out);
@@ -113,6 +102,7 @@ void* run_thread(void* arg) {
     pthread_exit(NULL);
 }
 
+// 레이어 초기화
 void init_shared_layers(SharedLayers* s) {
     pthread_mutex_init(&s->mutex_conv, NULL);
     pthread_mutex_init(&s->mutex_pool, NULL);
