@@ -4,8 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <omp.h>
 
-#define SIZE 128 
+#define SIZE 128
 #define VALID_SIZE (SIZE - 2)
 #define POOL_SIZE (VALID_SIZE / 2)
 #define FC1_SIZE 128
@@ -37,19 +38,17 @@ typedef struct {
     double *bias;
 } FullyConnected2Layer;
 
-// 함수 선언
 void conv2d_forward(Conv2DLayer* layer, double input[3][SIZE][SIZE], double output[16][VALID_SIZE][VALID_SIZE]);
 void relu_forward(double data[16][VALID_SIZE][VALID_SIZE]);
 void maxpool2d_forward(MaxPool2DLayer* layer, double input[16][VALID_SIZE][VALID_SIZE], double output[16][POOL_SIZE][POOL_SIZE]);
 void flatten_forward(double input[16][POOL_SIZE][POOL_SIZE], double* output);
-void fc1_forward(FullyConnected1Layer* layer, double* input, double* output);
-void fc2_forward(FullyConnected2Layer* layer, double* input, double* output);
+void fc1_forward(FullyConnected1Layer* layer, const double* input, double* output);
+void fc2_forward(FullyConnected2Layer* layer, const double* input, double* output);
 
 #endif
 
-// ===== 함수 정의 시작 =====
-
 void conv2d_forward(Conv2DLayer* layer, double input[3][SIZE][SIZE], double output[16][VALID_SIZE][VALID_SIZE]) {
+    #pragma omp parallel for collapse(2)
     for (int f = 0; f < layer->out_channels; f++) {
         for (int i = 1; i < SIZE-1; i++) {
             for (int j = 1; j < SIZE-1; j++) {
@@ -68,6 +67,7 @@ void conv2d_forward(Conv2DLayer* layer, double input[3][SIZE][SIZE], double outp
 }
 
 void relu_forward(double data[16][VALID_SIZE][VALID_SIZE]) {
+    #pragma omp parallel for collapse(3)
     for (int f = 0; f < 16; f++) {
         for (int i = 0; i < VALID_SIZE; i++) {
             for (int j = 0; j < VALID_SIZE; j++) {
@@ -79,6 +79,7 @@ void relu_forward(double data[16][VALID_SIZE][VALID_SIZE]) {
 }
 
 void maxpool2d_forward(MaxPool2DLayer* layer, double input[16][VALID_SIZE][VALID_SIZE], double output[16][POOL_SIZE][POOL_SIZE]) {
+    #pragma omp parallel for collapse(3)
     for (int f = 0; f < 16; f++) {
         for (int i = 0; i < VALID_SIZE; i += 2) {
             for (int j = 0; j < VALID_SIZE; j += 2) {
@@ -93,30 +94,40 @@ void maxpool2d_forward(MaxPool2DLayer* layer, double input[16][VALID_SIZE][VALID
 }
 
 void flatten_forward(double input[16][POOL_SIZE][POOL_SIZE], double* output) {
-    int idx = 0;
+    #pragma omp parallel for collapse(2)
     for (int f = 0; f < 16; f++) {
         for (int i = 0; i < POOL_SIZE; i++) {
             for (int j = 0; j < POOL_SIZE; j++) {
-                output[idx++] = input[f][i][j];
+                output[f * POOL_SIZE * POOL_SIZE + i * POOL_SIZE + j] = input[f][i][j];
             }
         }
     }
 }
 
-void fc1_forward(FullyConnected1Layer* layer, double* input, double* output) {
+void fc1_forward(FullyConnected1Layer* layer, const double* input, double* output) {
+    #pragma omp parallel for
     for (int j = 0; j < layer->output_size; j++) {
-        output[j] = layer->bias[j];
-        for (int i = 0; i < layer->input_size; i++) {
-            output[j] += input[i] * layer->weights[i][j];
+        double sum = layer->bias[j];
+        for (int i = 0; i < layer->input_size; i+=4) {
+            sum += input[i] * layer->weights[i][j];
+            sum += input[i+1] * layer->weights[i+1][j];
+            sum += input[i+2] * layer->weights[i+2][j];
+            sum += input[i+3] * layer->weights[i+3][j];
         }
+        output[j] = sum;
     }
 }
 
-void fc2_forward(FullyConnected2Layer* layer, double* input, double* output) {
+void fc2_forward(FullyConnected2Layer* layer, const double* input, double* output) {
+    #pragma omp parallel for
     for (int j = 0; j < layer->output_size; j++) {
-        output[j] = layer->bias[j];
-        for (int i = 0; i < layer->input_size; i++) {
-            output[j] += input[i] * layer->weights[i][j];
+        double sum = layer->bias[j];
+        for (int i = 0; i < layer->input_size; i+=4) {
+            sum += input[i] * layer->weights[i][j];
+            sum += input[i+1] * layer->weights[i+1][j];
+            sum += input[i+2] * layer->weights[i+2][j];
+            sum += input[i+3] * layer->weights[i+3][j];
         }
+        output[j] = sum;
     }
 }
