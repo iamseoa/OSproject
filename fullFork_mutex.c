@@ -6,14 +6,13 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
-#include <semaphore.h>
 #include "layers.h"
 
 #define NUM_INPUTS 9
 #define NUM_PROCESSES 3
 
 static double input_streams[NUM_INPUTS][3][SIZE][SIZE];
-sem_t* print_sem;
+pthread_mutex_t* print_mutex;
 
 void init_input_streams() {
     for (int n = 0; n < NUM_INPUTS; n++)
@@ -94,7 +93,7 @@ void run_inference(int idx) {
     fc1_forward(&fc1_layer, flatten_output, fc1_output);
     fc2_forward(&fc2_layer, fc1_output, fc2_output);
 
-    sem_wait(print_sem);
+    pthread_mutex_lock(print_mutex);
     printf("\n===== Finished input stream #%d =====\n", idx + 1);
     printf("Conv2D output sample: ");
     for (int i = 0; i < 5; i++) printf("%.5f ", conv_output[0][i][i]);
@@ -103,16 +102,22 @@ void run_inference(int idx) {
     printf("\nFC2 output sample: ");
     for (int i = 0; i < 5; i++) printf("%.5f ", fc2_output[i]);
     printf("\n[PID %d][TID %ld] finished.\n", getpid(), syscall(SYS_gettid));
-    sem_post(print_sem);
+    pthread_mutex_unlock(print_mutex);
 
     free(flatten_output); free(fc1_output); free(fc2_output); free(conv_output); free(pool_output);
 }
 
 int main() {
     init_input_streams();
-    print_sem = mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE,
-                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    sem_init(print_sem, 1, 1);
+
+    // mutex mmap 및 초기화
+    print_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(print_mutex, &attr);
 
     for (int i = 0; i < NUM_INPUTS; i++) {
         pid_t pid = fork();
@@ -121,6 +126,7 @@ int main() {
             exit(0);
         }
     }
+
     for (int i = 0; i < NUM_INPUTS; i++) wait(NULL);
     print_resource_usage();
     return 0;
