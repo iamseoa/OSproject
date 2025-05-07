@@ -95,7 +95,7 @@ int main() {
             fc1_forward(&fc1_layer, flatten_output, fc1_output);
             fc2_forward(&fc2_layer, fc1_output, fc2_output);
 
-            printf("\n===== Finished input stream #%d =====\n", idx + 1);
+            printf("===== [PID %d] Finished input stream #%d =====\n", getpid(), idx + 1);
             printf("Conv2D output sample: ");
             for (int i = 0; i < 5; i++) printf("%.5f ", conv_output[0][i][i]);
             printf("\n");
