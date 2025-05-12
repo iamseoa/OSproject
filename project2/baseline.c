@@ -51,8 +51,9 @@ int main() {
             printf("\n");
         }
 
-        printf("Conv Output [0][0][0] = %.2f\n", model.conv_output[0][0][0]);
-        printf("fc1[0:5] = ");
+        printf("Conv Output [0:5][0][0] = ");
+	for (int j = 0; j < 5; j++) printf("%.2f ", model.conv_output[j][0][0]);
+	printf("\nfc1[0:5] = ");
         for (int j = 0; j < 5; j++) printf("%.2f ", model.fc1_output[j]);
         printf("\nfc2[0:5] = ");
         for (int j = 0; j < 5; j++) printf("%.2f ", model.fc2_output[j]);
