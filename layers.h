@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <math.h>
 
-#define SIZE 256
+#define SIZE 128 
 #define VALID_SIZE (SIZE - 2)
 #define POOL_SIZE (VALID_SIZE / 2)
 #define FC1_SIZE 128
