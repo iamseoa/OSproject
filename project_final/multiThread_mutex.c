@@ -1,11 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/time.h>
-#include <sys/resource.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
+
 #define gettid() syscall(SYS_gettid)
 
 #define INPUT_SIZE 224
@@ -16,9 +16,7 @@
 #define FC1_OUT 256
 #define FC2_OUT 100
 #define NUM_INPUTS 8
-#define NUM_THREADS 4  
-
-pthread_mutex_t print_mutex = PTHREAD_MUTEX_INITIALIZER;
+#define NUM_THREADS 4
 
 typedef struct {
     float weights[CONV_DEPTH][CHANNELS][KERNEL_SIZE][KERNEL_SIZE];
@@ -53,27 +51,33 @@ typedef struct {
     CNNModel* model;
     float (*input)[INPUT_SIZE][CHANNELS];
     float (*output)[CONV_OUT][CONV_DEPTH];
-    int start, end;
+    int from, to;
+    double* times;
+    int tid;
 } ConvArgs;
 
 typedef struct {
     CNNModel* model;
     float* input;
     float* output;
-    int start, end;
+    int from, to;
+    double* times;
+    int tid;
 } FCArgs;
 
 double timer_ms(struct timeval start, struct timeval end) {
-    return (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_usec - start.tv_usec) / 1000.0;
+    return (end.tv_sec - start.tv_sec) * 1000.0 +
+           (end.tv_usec - start.tv_usec) / 1000.0;
 }
 
 void initialize_weights(CNNModel* model) {
+    int kernel[3][3] = {{1,2,1},{2,4,2},{1,2,1}};
     for (int d = 0; d < CONV_DEPTH; d++) {
         model->conv.biases[d] = 1.0f;
         for (int c = 0; c < CHANNELS; c++)
             for (int i = 0; i < KERNEL_SIZE; i++)
                 for (int j = 0; j < KERNEL_SIZE; j++)
-                    model->conv.weights[d][c][i][j] = (float)(i + j + 1);
+                    model->conv.weights[d][c][i][j] = (float)kernel[i][j];
     }
     for (int i = 0; i < FC1_OUT; i++) {
         model->fc1.biases[i] = 1.0f;
@@ -97,58 +101,95 @@ void initialize_input(float input[INPUT_SIZE][INPUT_SIZE][CHANNELS], int id) {
 
 void* conv_worker(void* args) {
     ConvArgs* arg = (ConvArgs*)args;
-    CNNModel* m = arg->model;
-    for (int d = arg->start; d < arg->end; d++)
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+    for (int d = arg->from; d < arg->to; d++)
         for (int i = 0; i < CONV_OUT; i++)
             for (int j = 0; j < CONV_OUT; j++) {
-                float sum = m->conv.biases[d];
+                float sum = arg->model->conv.biases[d];
                 for (int c = 0; c < CHANNELS; c++)
                     for (int ki = 0; ki < KERNEL_SIZE; ki++)
                         for (int kj = 0; kj < KERNEL_SIZE; kj++)
-                            sum += m->conv.weights[d][c][ki][kj] * arg->input[i+ki][j+kj][c];
+                            sum += arg->model->conv.weights[d][c][ki][kj] * arg->input[i+ki][j+kj][c];
                 arg->output[i][j][d] = sum;
             }
+    gettimeofday(&t1, NULL);
+    arg->times[arg->tid] = timer_ms(t0, t1);
     return NULL;
 }
 
 void* fc1_worker(void* args) {
     FCArgs* arg = (FCArgs*)args;
-    CNNModel* m = arg->model;
-    for (int i = arg->start; i < arg->end; i++) {
-        arg->output[i] = m->fc1.biases[i];
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+    for (int i = arg->from; i < arg->to; i++) {
+        arg->output[i] = arg->model->fc1.biases[i];
         for (int j = 0; j < (CONV_OUT/2)*(CONV_OUT/2)*CONV_DEPTH; j++)
-            arg->output[i] += m->fc1.weights[i][j] * arg->input[j];
+            arg->output[i] += arg->model->fc1.weights[i][j] * arg->input[j];
     }
+    gettimeofday(&t1, NULL);
+    arg->times[arg->tid] = timer_ms(t0, t1);
     return NULL;
 }
 
 void* fc2_worker(void* args) {
     FCArgs* arg = (FCArgs*)args;
-    CNNModel* m = arg->model;
-    for (int i = arg->start; i < arg->end; i++) {
-        arg->output[i] = m->fc2.biases[i];
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+    for (int i = arg->from; i < arg->to; i++) {
+        arg->output[i] = arg->model->fc2.biases[i];
         for (int j = 0; j < FC1_OUT; j++)
-            arg->output[i] += m->fc2.weights[i][j] * arg->input[j];
+            arg->output[i] += arg->model->fc2.weights[i][j] * arg->input[j];
     }
+    gettimeofday(&t1, NULL);
+    arg->times[arg->tid] = timer_ms(t0, t1);
     return NULL;
 }
 
-void print_resource_usage(struct timeval start, struct timeval end, double conv_t, double relu_t, double pool_t, double fc1_t, double fc2_t) {
-    struct rusage usage_self;
-    getrusage(RUSAGE_SELF, &usage_self);
+void relu_forward(float in[CONV_OUT][CONV_OUT][CONV_DEPTH], float out[CONV_OUT][CONV_OUT][CONV_DEPTH]) {
+    for (int d = 0; d < CONV_DEPTH; d++)
+        for (int i = 0; i < CONV_OUT; i++)
+            for (int j = 0; j < CONV_OUT; j++)
+                out[i][j][d] = (in[i][j][d] > 0) ? in[i][j][d] : 0;
+}
+
+void maxpool_forward(float in[CONV_OUT][CONV_OUT][CONV_DEPTH], float out[CONV_OUT/2][CONV_OUT/2][CONV_DEPTH]) {
+    for (int d = 0; d < CONV_DEPTH; d++)
+        for (int i = 0; i < CONV_OUT; i += 2)
+            for (int j = 0; j < CONV_OUT; j += 2) {
+                float maxval = in[i][j][d];
+                for (int di = 0; di < 2; di++)
+                    for (int dj = 0; dj < 2; dj++)
+                        if (in[i+di][j+dj][d] > maxval)
+                            maxval = in[i+di][j+dj][d];
+                out[i/2][j/2][d] = maxval;
+            }
+}
+
+void flatten(float in[CONV_OUT/2][CONV_OUT/2][CONV_DEPTH], float out[]) {
+    int idx = 0;
+    for (int d = 0; d < CONV_DEPTH; d++)
+        for (int i = 0; i < CONV_OUT/2; i++)
+            for (int j = 0; j < CONV_OUT/2; j++)
+                out[idx++] = in[i][j][d];
+}
+
+void print_resource_usage(struct timeval start, struct timeval end,
+                          double conv_t, double relu_t, double pool_t, double fc1_t, double fc2_t) {
+    struct rusage usage;
+    getrusage(RUSAGE_SELF, &usage);
 
     double wall_time = timer_ms(start, end);
-    double user_cpu_self = usage_self.ru_utime.tv_sec * 1000.0 + usage_self.ru_utime.tv_usec / 1000.0;
-    double sys_cpu_self  = usage_self.ru_stime.tv_sec * 1000.0 + usage_self.ru_stime.tv_usec / 1000.0;
-    double total_self = user_cpu_self + sys_cpu_self;
+    double user_cpu = usage.ru_utime.tv_sec * 1000.0 + usage.ru_utime.tv_usec / 1000.0;
+    double sys_cpu  = usage.ru_stime.tv_sec * 1000.0 + usage.ru_stime.tv_usec / 1000.0;
+    double total_cpu = user_cpu + sys_cpu;
 
     printf("\n== Performance Metrics ==\n");
     printf("Wall Clock Time    : %.3f ms\n", wall_time);
-    printf("User CPU Time      : %.3f ms\n", user_cpu_self);
-    printf("System CPU Time    : %.3f ms\n", sys_cpu_self);
-    printf("CPU Utilization    : %.2f %%\n", (total_self / wall_time) * 100.0);
-    printf("Max RSS Memory     : %ld KB\n", usage_self.ru_maxrss);
-    
+    printf("User CPU Time      : %.3f ms\n", user_cpu);
+    printf("System CPU Time    : %.3f ms\n", sys_cpu);
+    printf("CPU Utilization    : %.2f %%\n", (total_cpu / wall_time) * 100.0);
+    printf("Max RSS Memory     : %ld KB\n", usage.ru_maxrss);
     printf("\n== Layer-wise Time (sum for all inputs) ==\n");
     printf("Conv Layer   : %.3f ms\n", conv_t);
     printf("ReLU Layer   : %.3f ms\n", relu_t);
@@ -161,70 +202,62 @@ int main() {
     initialize_weights(&model);
     for (int i = 0; i < NUM_INPUTS; i++) initialize_input(inputs[i], i);
 
-    struct timeval start, end;
-    double conv_time = 0, relu_time = 0, pool_time = 0, fc1_time = 0, fc2_time = 0;
+    struct timeval start, end, t0, t1;
+    double conv_total = 0, relu_total = 0, pool_total = 0, fc1_total = 0, fc2_total = 0;
 
     gettimeofday(&start, NULL);
 
     for (int idx = 0; idx < NUM_INPUTS; idx++) {
         float flat[(CONV_OUT/2)*(CONV_OUT/2)*CONV_DEPTH];
-        pthread_t conv_threads[NUM_THREADS];
-        ConvArgs cargs[NUM_THREADS];
+        double conv_times[NUM_THREADS] = {0}, fc1_times[NUM_THREADS] = {0}, fc2_times[NUM_THREADS] = {0};
+        pthread_t conv_threads[NUM_THREADS], fc1_threads[NUM_THREADS], fc2_threads[NUM_THREADS];
+        ConvArgs conv_args[NUM_THREADS];
+        FCArgs fc1_args[NUM_THREADS], fc2_args[NUM_THREADS];
 
-        struct timeval start, end, t0, t1;
-        double conv_time = 0, fc1_time = 0, fc2_time = 0;
-        double relu_time = 0, pool_time = 0;
-
-        gettimeofday(&start, NULL);
-
+        // Conv
+        gettimeofday(&t0, NULL);
         for (int t = 0; t < NUM_THREADS; t++) {
-            cargs[t].model = &model;
-            cargs[t].input = inputs[idx];
-            cargs[t].output = model.conv_output;
-            cargs[t].start = t * (CONV_DEPTH / NUM_THREADS);
-            cargs[t].end = (t+1) * (CONV_DEPTH / NUM_THREADS);
-            pthread_create(&conv_threads[t], NULL, conv_worker, &cargs[t]);
+            conv_args[t] = (ConvArgs){&model, inputs[idx], model.conv_output,
+                t*(CONV_DEPTH/NUM_THREADS), (t+1)*(CONV_DEPTH/NUM_THREADS), conv_times, t};
+            pthread_create(&conv_threads[t], NULL, conv_worker, &conv_args[t]);
         }
         for (int t = 0; t < NUM_THREADS; t++) pthread_join(conv_threads[t], NULL);
+        gettimeofday(&t1, NULL);
+        conv_total += timer_ms(t0, t1);
 
-        for (int d = 0; d < CONV_DEPTH; d++)
-            for (int i = 0; i < CONV_OUT; i++)
-                for (int j = 0; j < CONV_OUT; j++)
-                    model.relu_output[i][j][d] = (model.conv_output[i][j][d] > 0) ? model.conv_output[i][j][d] : 0;
+        gettimeofday(&t0, NULL);
+        relu_forward(model.conv_output, model.relu_output);
+        gettimeofday(&t1, NULL);
+        relu_total += timer_ms(t0, t1);
 
-        for (int d = 0; d < CONV_DEPTH; d++)
-            for (int i = 0; i < CONV_OUT; i += 2)
-                for (int j = 0; j < CONV_OUT; j += 2) {
-                    float maxval = model.relu_output[i][j][d];
-                    for (int di = 0; di < 2; di++)
-                        for (int dj = 0; dj < 2; dj++)
-                            if (model.relu_output[i+di][j+dj][d] > maxval)
-                                maxval = model.relu_output[i+di][j+dj][d];
-                    model.pooled_output[i/2][j/2][d] = maxval;
-                }
+        gettimeofday(&t0, NULL);
+        maxpool_forward(model.relu_output, model.pooled_output);
+        gettimeofday(&t1, NULL);
+        pool_total += timer_ms(t0, t1);
 
-        int flat_idx = 0;
-        for (int d = 0; d < CONV_DEPTH; d++)
-            for (int i = 0; i < CONV_OUT/2; i++)
-                for (int j = 0; j < CONV_OUT/2; j++)
-                    flat[flat_idx++] = model.pooled_output[i][j][d];
+        flatten(model.pooled_output, flat);
 
-        pthread_t fc1_threads[NUM_THREADS], fc2_threads[NUM_THREADS];
-        FCArgs f1args[NUM_THREADS], f2args[NUM_THREADS];
-
+        gettimeofday(&t0, NULL);
         for (int t = 0; t < NUM_THREADS; t++) {
-            f1args[t] = (FCArgs){ &model, flat, model.fc1_output, t*(FC1_OUT/NUM_THREADS), (t+1)*(FC1_OUT/NUM_THREADS) };
-            pthread_create(&fc1_threads[t], NULL, fc1_worker, &f1args[t]);
+            fc1_args[t] = (FCArgs){&model, flat, model.fc1_output,
+                t*(FC1_OUT/NUM_THREADS), (t+1)*(FC1_OUT/NUM_THREADS), fc1_times, t};
+            pthread_create(&fc1_threads[t], NULL, fc1_worker, &fc1_args[t]);
         }
         for (int t = 0; t < NUM_THREADS; t++) pthread_join(fc1_threads[t], NULL);
+        gettimeofday(&t1, NULL);
+        fc1_total += timer_ms(t0, t1);
 
+        gettimeofday(&t0, NULL);
         for (int t = 0; t < NUM_THREADS; t++) {
-            f2args[t] = (FCArgs){ &model, model.fc1_output, model.fc2_output, t*(FC2_OUT/NUM_THREADS), (t+1)*(FC2_OUT/NUM_THREADS) };
-            pthread_create(&fc2_threads[t], NULL, fc2_worker, &f2args[t]);
+            fc2_args[t] = (FCArgs){&model, model.fc1_output, model.fc2_output,
+                t*(FC2_OUT/NUM_THREADS), (t+1)*(FC2_OUT/NUM_THREADS), fc2_times, t};
+            pthread_create(&fc2_threads[t], NULL, fc2_worker, &fc2_args[t]);
         }
         for (int t = 0; t < NUM_THREADS; t++) pthread_join(fc2_threads[t], NULL);
+        gettimeofday(&t1, NULL);
+        fc2_total += timer_ms(t0, t1);
 
-        pthread_mutex_lock(&print_mutex);
+        // 출력
         printf("\n== Input %d (PID %d, TID %ld) ==\n", idx, getpid(), gettid());
         printf("Input Patch [0:3][0:3][0]:\n");
         for (int x = 0; x < 3; x++) {
@@ -237,11 +270,17 @@ int main() {
         for (int j = 0; j < 5; j++) printf("%.2f ", model.fc1_output[j]);
         printf("\nfc2[0:5] = ");
         for (int j = 0; j < 5; j++) printf("%.2f ", model.fc2_output[j]);
+
+        printf("\n[Conv]");
+        for (int t = 0; t < NUM_THREADS; t++) printf(" [T%d] %.3f ms", t, conv_times[t]);
+        printf("\n[FC1 ]");
+        for (int t = 0; t < NUM_THREADS; t++) printf(" [T%d] %.3f ms", t, fc1_times[t]);
+        printf("\n[FC2 ]");
+        for (int t = 0; t < NUM_THREADS; t++) printf(" [T%d] %.3f ms", t, fc2_times[t]);
         printf("\n");
-        pthread_mutex_unlock(&print_mutex);
     }
 
     gettimeofday(&end, NULL);
-    print_resource_usage(start, end, conv_time, relu_time, pool_time, fc1_time, fc2_time);
+    print_resource_usage(start, end, conv_total, relu_total, pool_total, fc1_total, fc2_total);
     return 0;
 }
