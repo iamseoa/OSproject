@@ -4,7 +4,7 @@
 #define INPUT_SIZE 224
 #define CHANNELS 3
 #define KERNEL_SIZE 3
-#define CONV_DEPTH 16
+#define CONV_DEPTH 16 
 #define CONV_OUT (INPUT_SIZE - KERNEL_SIZE + 1)
 #define FC1_OUT 256
 #define FC2_OUT 100
