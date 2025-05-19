@@ -214,7 +214,6 @@ int main() {
         ConvArgs conv_args[NUM_THREADS];
         FCArgs fc1_args[NUM_THREADS], fc2_args[NUM_THREADS];
 
-        // Conv
         gettimeofday(&t0, NULL);
         for (int t = 0; t < NUM_THREADS; t++) {
             conv_args[t] = (ConvArgs){&model, inputs[idx], model.conv_output,
@@ -257,7 +256,6 @@ int main() {
         gettimeofday(&t1, NULL);
         fc2_total += timer_ms(t0, t1);
 
-        // 출력
         printf("\n== Input %d (PID %d, TID %ld) ==\n", idx, getpid(), gettid());
         printf("Input Patch [0:3][0:3][0]:\n");
         for (int x = 0; x < 3; x++) {
