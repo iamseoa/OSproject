@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
+#include <pthread.h>
 #define gettid() syscall(SYS_gettid)
 
 #define INPUT_SIZE 224
@@ -37,15 +38,12 @@ typedef struct {
     ConvLayer conv;
     FullyConnectedLayer1 fc1;
     FullyConnectedLayer2 fc2;
-    float conv_output[CONV_OUT][CONV_OUT][CONV_DEPTH];
-    float relu_output[CONV_OUT][CONV_OUT][CONV_DEPTH];
-    float pooled_output[CONV_OUT / 2][CONV_OUT / 2][CONV_DEPTH];
-    float fc1_output[FC1_OUT];
-    float fc2_output[FC2_OUT];
 } CNNModel;
 
 CNNModel *model;
-float inputs[NUM_INPUTS][INPUT_SIZE][INPUT_SIZE][CHANNELS];
+float (*inputs)[INPUT_SIZE][INPUT_SIZE][CHANNELS];
+pthread_mutex_t *model_mutex;
+double *conv_time, *relu_time, *pool_time, *fc1_time, *fc2_time;
 
 double timer_ms(struct timeval start, struct timeval end) {
     return (end.tv_sec - start.tv_sec) * 1000.0 +
@@ -59,7 +57,7 @@ void initialize_weights(CNNModel* model) {
         for (int c = 0; c < CHANNELS; c++)
             for (int i = 0; i < KERNEL_SIZE; i++)
                 for (int j = 0; j < KERNEL_SIZE; j++)
-                    model->conv.weights[d][c][i][j] = (float)kernel[i][j];
+                    model->conv.weights[d][c][i][j] = kernel[i][j];
     }
     for (int i = 0; i < FC1_OUT; i++) {
         model->fc1.biases[i] = 1.0f;
@@ -142,12 +140,11 @@ void fc2_forward(CNNModel* model, float input[], float output[FC2_OUT]) {
 void print_resource_usage(struct timeval start, struct timeval end, double conv_t, double relu_t, double pool_t, double fc1_t, double fc2_t) {
     struct rusage usage_self;
     getrusage(RUSAGE_SELF, &usage_self);
-    
+
     double wall_time = timer_ms(start, end);
     double user_cpu_self = usage_self.ru_utime.tv_sec * 1000.0 + usage_self.ru_utime.tv_usec / 1000.0;
     double sys_cpu_self  = usage_self.ru_stime.tv_sec * 1000.0 + usage_self.ru_stime.tv_usec / 1000.0;
     double total_self = user_cpu_self + sys_cpu_self;
-
 
     printf("\n== Performance Metrics ==\n");
     printf("Wall Clock Time    : %.3f ms\n", wall_time);
@@ -155,9 +152,6 @@ void print_resource_usage(struct timeval start, struct timeval end, double conv_
     printf("System CPU Time    : %.3f ms\n", sys_cpu_self);
     printf("CPU Utilization    : %.2f %%\n", (total_self / wall_time) * 100.0);
     printf("Max RSS Memory     : %ld KB\n", usage_self.ru_maxrss);
-    printf("Voluntary Context Switches   : %ld\n", usage_self.ru_nvcsw);
-    printf("Involuntary Context Switches : %ld\n", usage_self.ru_nivcsw);
-    
     printf("\n== Layer-wise Time (sum for all inputs) ==\n");
     printf("Conv Layer   : %.3f ms\n", conv_t);
     printf("ReLU Layer   : %.3f ms\n", relu_t);
@@ -167,73 +161,86 @@ void print_resource_usage(struct timeval start, struct timeval end, double conv_
 }
 
 int main() {
-    model = mmap(NULL, sizeof(CNNModel), PROT_READ | PROT_WRITE,
-                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (model == MAP_FAILED) {
-        perror("mmap failed for model");
-        exit(1);
-    }
+    model = mmap(NULL, sizeof(CNNModel), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    inputs = mmap(NULL, sizeof(float) * NUM_INPUTS * INPUT_SIZE * INPUT_SIZE * CHANNELS,
+                  PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    model_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    pthread_mutex_t *print_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE,
+                                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    conv_time = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    relu_time = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    pool_time = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc1_time  = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    fc2_time  = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(model_mutex, &attr);
+    pthread_mutex_init(print_mutex, &attr);
 
     initialize_weights(model);
     for (int i = 0; i < NUM_INPUTS; i++)
         initialize_input(inputs[i], i);
 
-    double *conv_time = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    double *relu_time = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    double *pool_time = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    double *fc1_time  = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    double *fc2_time  = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-
     struct timeval start, end;
     gettimeofday(&start, NULL);
 
     for (int i = 0; i < NUM_INPUTS; i++) {
-        pid_t pid = fork();
-        if (pid == 0) {
-            float flat[(CONV_OUT / 2) * (CONV_OUT / 2) * CONV_DEPTH];
+        if (fork() == 0) {
+            float (*conv_out)[CONV_OUT][CONV_DEPTH] = malloc(sizeof(float) * CONV_OUT * CONV_OUT * CONV_DEPTH);
+            float (*relu_out)[CONV_OUT][CONV_DEPTH] = malloc(sizeof(float) * CONV_OUT * CONV_OUT * CONV_DEPTH);
+            float (*pool_out)[CONV_OUT/2][CONV_DEPTH] = malloc(sizeof(float) * (CONV_OUT/2) * (CONV_OUT/2) * CONV_DEPTH);
+            float *flat = malloc(sizeof(float) * (CONV_OUT/2) * (CONV_OUT/2) * CONV_DEPTH);
+            float *fc1_out = malloc(sizeof(float) * FC1_OUT);
+            float *fc2_out = malloc(sizeof(float) * FC2_OUT);
+
             struct timeval t0, t1;
             double ct, rt, pt, f1t, f2t;
 
             gettimeofday(&t0, NULL);
-            conv_forward(model, inputs[i], model->conv_output);
+            conv_forward(model, inputs[i], conv_out);
             gettimeofday(&t1, NULL);
             ct = timer_ms(t0, t1);
-            *conv_time += ct;
 
             gettimeofday(&t0, NULL);
-            relu_forward(model->conv_output, model->relu_output);
+            relu_forward(conv_out, relu_out);
             gettimeofday(&t1, NULL);
             rt = timer_ms(t0, t1);
-            *relu_time += rt;
 
             gettimeofday(&t0, NULL);
-            maxpool_forward(model->relu_output, model->pooled_output);
+            maxpool_forward(relu_out, pool_out);
             gettimeofday(&t1, NULL);
             pt = timer_ms(t0, t1);
-            *pool_time += pt;
 
-            flatten(model->pooled_output, flat);
+            flatten(pool_out, flat);
 
             gettimeofday(&t0, NULL);
-            fc1_forward(model, flat, model->fc1_output);
+            fc1_forward(model, flat, fc1_out);
             gettimeofday(&t1, NULL);
             f1t = timer_ms(t0, t1);
-            *fc1_time += f1t;
 
             gettimeofday(&t0, NULL);
-            fc2_forward(model, model->fc1_output, model->fc2_output);
+            fc2_forward(model, fc1_out, fc2_out);
             gettimeofday(&t1, NULL);
             f2t = timer_ms(t0, t1);
+
+            pthread_mutex_lock(model_mutex);
+            *conv_time += ct;
+            *relu_time += rt;
+            *pool_time += pt;
+            *fc1_time += f1t;
             *fc2_time += f2t;
+            pthread_mutex_unlock(model_mutex);
 
             struct rusage ru;
             getrusage(RUSAGE_SELF, &ru);
             double user_cpu = ru.ru_utime.tv_sec * 1000.0 + ru.ru_utime.tv_usec / 1000.0;
             double sys_cpu  = ru.ru_stime.tv_sec * 1000.0 + ru.ru_stime.tv_usec / 1000.0;
-            double total_cpu = user_cpu + sys_cpu;
             double total_time = ct + rt + pt + f1t + f2t;
-            double cpu_util = (total_time > 0.0) ? (total_cpu / total_time) * 100.0 : 0.0;
+            double cpu_util = (user_cpu + sys_cpu) / total_time * 100.0;
 
+            pthread_mutex_lock(print_mutex);
             printf("\n== Child Process Resource Usage (PID %d, TID %ld) ==\n", getpid(), gettid());
             printf("User CPU Time      : %.3f ms\n", user_cpu);
             printf("System CPU Time    : %.3f ms\n", sys_cpu);
@@ -242,30 +249,26 @@ int main() {
 
             printf("Input Patch [0:3][0:3][0]:\n");
             for (int x = 0; x < 3; x++) {
-                for (int y = 0; y < 3; y++) {
-                    printf("%.1f ", inputs[i][x][y][0]);
-                }
+                for (int y = 0; y < 3; y++) printf("%.1f ", inputs[i][x][y][0]);
                 printf("\n");
             }
 
             printf("Conv Output [0:5][0][0] = ");
-            for (int j = 0; j < 5; j++) printf("%.2f ", model->conv_output[j][0][0]);
+            for (int j = 0; j < 5; j++) printf("%.2f ", conv_out[j][0][0]);
+            printf("\nfc1[0:5] = ");
+            for (int j = 0; j < 5; j++) printf("%.2f ", fc1_out[j]);
+            printf("\nfc2[0:5] = ");
+            for (int j = 0; j < 5; j++) printf("%.2f ", fc2_out[j]);
             printf("\n");
+            pthread_mutex_unlock(print_mutex);
 
-            printf("fc1[0:5] = ");
-            for (int j = 0; j < 5; j++) printf("%.2f ", model->fc1_output[j]);
-            printf("\n");
-
-            printf("fc2[0:5] = ");
-            for (int j = 0; j < 5; j++) printf("%.2f ", model->fc2_output[j]);
-            printf("\n");
-
+            free(conv_out); free(relu_out); free(pool_out);
+            free(flat); free(fc1_out); free(fc2_out);
             exit(0);
         }
-        
-        wait(NULL);
     }
 
+    for (int i = 0; i < NUM_INPUTS; i++) wait(NULL);
     gettimeofday(&end, NULL);
     print_resource_usage(start, end, *conv_time, *relu_time, *pool_time, *fc1_time, *fc2_time);
     return 0;

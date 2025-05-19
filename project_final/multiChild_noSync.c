@@ -45,7 +45,7 @@ typedef struct {
 } CNNModel;
 
 CNNModel *model;
-float inputs[NUM_INPUTS][INPUT_SIZE][INPUT_SIZE][CHANNELS];
+float (*inputs)[INPUT_SIZE][INPUT_SIZE][CHANNELS];
 
 double timer_ms(struct timeval start, struct timeval end) {
     return (end.tv_sec - start.tv_sec) * 1000.0 +
@@ -142,12 +142,11 @@ void fc2_forward(CNNModel* model, float input[], float output[FC2_OUT]) {
 void print_resource_usage(struct timeval start, struct timeval end, double conv_t, double relu_t, double pool_t, double fc1_t, double fc2_t) {
     struct rusage usage_self;
     getrusage(RUSAGE_SELF, &usage_self);
-    
+
     double wall_time = timer_ms(start, end);
     double user_cpu_self = usage_self.ru_utime.tv_sec * 1000.0 + usage_self.ru_utime.tv_usec / 1000.0;
     double sys_cpu_self  = usage_self.ru_stime.tv_sec * 1000.0 + usage_self.ru_stime.tv_usec / 1000.0;
     double total_self = user_cpu_self + sys_cpu_self;
-
 
     printf("\n== Performance Metrics ==\n");
     printf("Wall Clock Time    : %.3f ms\n", wall_time);
@@ -157,7 +156,6 @@ void print_resource_usage(struct timeval start, struct timeval end, double conv_
     printf("Max RSS Memory     : %ld KB\n", usage_self.ru_maxrss);
     printf("Voluntary Context Switches   : %ld\n", usage_self.ru_nvcsw);
     printf("Involuntary Context Switches : %ld\n", usage_self.ru_nivcsw);
-    
     printf("\n== Layer-wise Time (sum for all inputs) ==\n");
     printf("Conv Layer   : %.3f ms\n", conv_t);
     printf("ReLU Layer   : %.3f ms\n", relu_t);
@@ -167,26 +165,22 @@ void print_resource_usage(struct timeval start, struct timeval end, double conv_
 }
 
 int main() {
-    model = mmap(NULL, sizeof(CNNModel), PROT_READ | PROT_WRITE,
-                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (model == MAP_FAILED) {
-        perror("mmap failed for model");
-        exit(1);
-    }
-
-    initialize_weights(model);
-    for (int i = 0; i < NUM_INPUTS; i++)
-        initialize_input(inputs[i], i);
-
+    model = mmap(NULL, sizeof(CNNModel), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    inputs = mmap(NULL, sizeof(float) * NUM_INPUTS * INPUT_SIZE * INPUT_SIZE * CHANNELS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     double *conv_time = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     double *relu_time = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     double *pool_time = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     double *fc1_time  = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     double *fc2_time  = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
+    initialize_weights(model);
+    for (int i = 0; i < NUM_INPUTS; i++)
+        initialize_input(inputs[i], i);
+
     struct timeval start, end;
     gettimeofday(&start, NULL);
 
+    pid_t pids[NUM_INPUTS];
     for (int i = 0; i < NUM_INPUTS; i++) {
         pid_t pid = fork();
         if (pid == 0) {
@@ -197,49 +191,31 @@ int main() {
             gettimeofday(&t0, NULL);
             conv_forward(model, inputs[i], model->conv_output);
             gettimeofday(&t1, NULL);
-            ct = timer_ms(t0, t1);
-            *conv_time += ct;
+            ct = timer_ms(t0, t1); *conv_time += ct;
 
             gettimeofday(&t0, NULL);
             relu_forward(model->conv_output, model->relu_output);
             gettimeofday(&t1, NULL);
-            rt = timer_ms(t0, t1);
-            *relu_time += rt;
+            rt = timer_ms(t0, t1); *relu_time += rt;
 
             gettimeofday(&t0, NULL);
             maxpool_forward(model->relu_output, model->pooled_output);
             gettimeofday(&t1, NULL);
-            pt = timer_ms(t0, t1);
-            *pool_time += pt;
+            pt = timer_ms(t0, t1); *pool_time += pt;
 
             flatten(model->pooled_output, flat);
 
             gettimeofday(&t0, NULL);
             fc1_forward(model, flat, model->fc1_output);
             gettimeofday(&t1, NULL);
-            f1t = timer_ms(t0, t1);
-            *fc1_time += f1t;
+            f1t = timer_ms(t0, t1); *fc1_time += f1t;
 
             gettimeofday(&t0, NULL);
             fc2_forward(model, model->fc1_output, model->fc2_output);
             gettimeofday(&t1, NULL);
-            f2t = timer_ms(t0, t1);
-            *fc2_time += f2t;
-
-            struct rusage ru;
-            getrusage(RUSAGE_SELF, &ru);
-            double user_cpu = ru.ru_utime.tv_sec * 1000.0 + ru.ru_utime.tv_usec / 1000.0;
-            double sys_cpu  = ru.ru_stime.tv_sec * 1000.0 + ru.ru_stime.tv_usec / 1000.0;
-            double total_cpu = user_cpu + sys_cpu;
-            double total_time = ct + rt + pt + f1t + f2t;
-            double cpu_util = (total_time > 0.0) ? (total_cpu / total_time) * 100.0 : 0.0;
+            f2t = timer_ms(t0, t1); *fc2_time += f2t;
 
             printf("\n== Child Process Resource Usage (PID %d, TID %ld) ==\n", getpid(), gettid());
-            printf("User CPU Time      : %.3f ms\n", user_cpu);
-            printf("System CPU Time    : %.3f ms\n", sys_cpu);
-            printf("CPU Utilization    : %.2f %%\n", cpu_util);
-            printf("Max RSS Memory     : %ld KB\n", ru.ru_maxrss);
-
             printf("Input Patch [0:3][0:3][0]:\n");
             for (int x = 0; x < 3; x++) {
                 for (int y = 0; y < 3; y++) {
@@ -250,22 +226,18 @@ int main() {
 
             printf("Conv Output [0:5][0][0] = ");
             for (int j = 0; j < 5; j++) printf("%.2f ", model->conv_output[j][0][0]);
-            printf("\n");
-
-            printf("fc1[0:5] = ");
+            printf("\nfc1[0:5] = ");
             for (int j = 0; j < 5; j++) printf("%.2f ", model->fc1_output[j]);
-            printf("\n");
-
-            printf("fc2[0:5] = ");
+            printf("\nfc2[0:5] = ");
             for (int j = 0; j < 5; j++) printf("%.2f ", model->fc2_output[j]);
             printf("\n");
-
             exit(0);
+        } else {
+            pids[i] = pid;
         }
-        
-        wait(NULL);
     }
 
+    for (int i = 0; i < NUM_INPUTS; i++) waitpid(pids[i], NULL, 0);
     gettimeofday(&end, NULL);
     print_resource_usage(start, end, *conv_time, *relu_time, *pool_time, *fc1_time, *fc2_time);
     return 0;
