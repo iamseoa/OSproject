@@ -14,9 +14,9 @@
 #define FC2_OUT 100
 #define NUM_INPUTS 40
 
-int NUM_THREADS_CONV = 4;
-int NUM_THREADS_FC1 = 4;
-int NUM_THREADS_FC2 = 4;
+int NUM_THREADS_CONV = 16;
+int NUM_THREADS_FC1 = 16;
+int NUM_THREADS_FC2 = 16;
 
 typedef struct {
     float weights[CONV_DEPTH][CHANNELS][KERNEL_SIZE][KERNEL_SIZE];
@@ -132,11 +132,25 @@ void* conv_thread_fn(void* arg) {
 }
 
 void conv_forward(CNNModel* model, float input[INPUT_SIZE][INPUT_SIZE][CHANNELS], float output[CONV_OUT][CONV_OUT][CONV_DEPTH]) {
-    pthread_t tid;
-    ConvThreadArg arg = {0, CONV_DEPTH, model, &input[0][0][0], &output[0][0][0]};
-    pthread_create(&tid, NULL, conv_thread_fn, &arg);
-    pthread_join(tid, NULL);
+    pthread_t threads[NUM_THREADS_CONV];
+    ConvThreadArg args[NUM_THREADS_CONV];
+    int chunk = CONV_DEPTH / NUM_THREADS_CONV;
+
+    for (int i = 0; i < NUM_THREADS_CONV; i++) {
+        args[i].start_d = i * chunk;
+        args[i].end_d = (i == NUM_THREADS_CONV - 1) ? CONV_DEPTH : (i + 1) * chunk; // 끝 범위 조정
+        args[i].model = model;
+        args[i].input = &input[0][0][0];
+        args[i].output = &output[0][0][0];
+
+        pthread_create(&threads[i], NULL, conv_thread_fn, &args[i]);
+    }
+
+    for (int i = 0; i < NUM_THREADS_CONV; i++) {
+        pthread_join(threads[i], NULL);
+    }
 }
+
 
 // ====== ReLU, MaxPool, Flatten ======
 void relu_forward(float in[CONV_OUT][CONV_OUT][CONV_DEPTH], float out[CONV_OUT][CONV_OUT][CONV_DEPTH]) {
