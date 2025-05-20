@@ -1,4 +1,7 @@
 
+
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -22,7 +25,7 @@
 #define NUM_THREADS 4
 
 typedef struct {
-    float input[INPUT_SIZE][INPUT_SIZE][CHANNELS];
+    float (*input)[INPUT_SIZE][CHANNELS];
     float conv_output[CONV_OUT][CONV_OUT][CONV_DEPTH];
     float relu_output[CONV_OUT][CONV_OUT][CONV_DEPTH];
     float pooled_output[CONV_OUT / 2][CONV_OUT / 2][CONV_DEPTH];
@@ -56,8 +59,8 @@ typedef struct {
 typedef struct {
     int tid, from, to;
     CNNModel* model;
-    float input[INPUT_SIZE][INPUT_SIZE][CHANNELS];
-    float output[CONV_OUT][CONV_OUT][CONV_DEPTH];
+    float (*input)[INPUT_SIZE][CHANNELS];
+    float (*output)[CONV_OUT][CONV_DEPTH];
 } ConvArgs;
 
 typedef struct {
@@ -66,6 +69,13 @@ typedef struct {
     float* input;
     float* output;
 } FCArgs;
+
+
+// Add timer_ms definition at top of file
+double timer_ms(struct timeval start, struct timeval end) {
+    return (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_usec - start.tv_usec) / 1000.0;
+}
+
 
 // Dummy CNNModel initialization
 void init_model(CNNModel* model) {
@@ -234,8 +244,7 @@ int main() {
         for (int i = 0; i < NUM_INPUTS; i++) {
             sem_wait(&sem_fc1_done[i]);
             fc2_forward(model, samples[i].fc1_output, samples[i].fc2_output);
-            printf("[Input %d] fc2_output[0] = %.2f
-", i, samples[i].fc2_output[0]);
+            printf("[Input %d] fc2_output[0] = %.2f\n", i, samples[i].fc2_output[0]);
         }
         exit(0);
     }
