@@ -132,20 +132,6 @@ void* fc1_worker(void* args) {
     return NULL;
 }
 
-void* fc2_worker(void* args) {
-    FCArgs* arg = (FCArgs*)args;
-    struct timeval t0, t1;
-    gettimeofday(&t0, NULL);
-    for (int i = arg->from; i < arg->to; i++) {
-        arg->output[i] = arg->model->fc2.biases[i];
-        for (int j = 0; j < FC1_OUT; j++)
-            arg->output[i] += arg->model->fc2.weights[i][j] * arg->input[j];
-    }
-    gettimeofday(&t1, NULL);
-    arg->times[arg->tid] = timer_ms(t0, t1);
-    return NULL;
-}
-
 void relu_forward(float in[CONV_OUT][CONV_OUT][CONV_DEPTH], float out[CONV_OUT][CONV_OUT][CONV_DEPTH]) {
     for (int d = 0; d < CONV_DEPTH; d++)
         for (int i = 0; i < CONV_OUT; i++)
@@ -209,10 +195,10 @@ int main() {
 
     for (int idx = 0; idx < NUM_INPUTS; idx++) {
         float flat[(CONV_OUT/2)*(CONV_OUT/2)*CONV_DEPTH];
-        double conv_times[NUM_THREADS] = {0}, fc1_times[NUM_THREADS] = {0}, fc2_times[NUM_THREADS] = {0};
-        pthread_t conv_threads[NUM_THREADS], fc1_threads[NUM_THREADS], fc2_threads[NUM_THREADS];
+        double conv_times[NUM_THREADS] = {0}, fc1_times[NUM_THREADS] = {0};
+        pthread_t conv_threads[NUM_THREADS], fc1_threads[NUM_THREADS];
         ConvArgs conv_args[NUM_THREADS];
-        FCArgs fc1_args[NUM_THREADS], fc2_args[NUM_THREADS];
+        FCArgs fc1_args[NUM_THREADS];
 
         gettimeofday(&t0, NULL);
         for (int t = 0; t < NUM_THREADS; t++) {
@@ -247,12 +233,11 @@ int main() {
         fc1_total += timer_ms(t0, t1);
 
         gettimeofday(&t0, NULL);
-        for (int t = 0; t < NUM_THREADS; t++) {
-            fc2_args[t] = (FCArgs){&model, model.fc1_output, model.fc2_output,
-                t*(FC2_OUT/NUM_THREADS), (t+1)*(FC2_OUT/NUM_THREADS), fc2_times, t};
-            pthread_create(&fc2_threads[t], NULL, fc2_worker, &fc2_args[t]);
+        for (int i = 0; i < FC2_OUT; i++) {
+            model.fc2_output[i] = model.fc2.biases[i];
+            for (int j = 0; j < FC1_OUT; j++)
+                model.fc2_output[i] += model.fc2.weights[i][j] * model.fc1_output[j];
         }
-        for (int t = 0; t < NUM_THREADS; t++) pthread_join(fc2_threads[t], NULL);
         gettimeofday(&t1, NULL);
         fc2_total += timer_ms(t0, t1);
 
@@ -273,9 +258,8 @@ int main() {
         for (int t = 0; t < NUM_THREADS; t++) printf(" [T%d] %.3f ms", t, conv_times[t]);
         printf("\n[FC1 ]");
         for (int t = 0; t < NUM_THREADS; t++) printf(" [T%d] %.3f ms", t, fc1_times[t]);
-        printf("\n[FC2 ]");
-        for (int t = 0; t < NUM_THREADS; t++) printf(" [T%d] %.3f ms", t, fc2_times[t]);
-        printf("\n");
+	printf("\n");
+
     }
 
     gettimeofday(&end, NULL);
