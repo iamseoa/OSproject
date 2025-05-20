@@ -80,33 +80,35 @@ void initialize_input(float input[INPUT_SIZE][INPUT_SIZE][CHANNELS], int id) {
                 input[i][j][c] = (i == 1 && j == 1) ? center : 1.0f;
 }
 
-void conv_forward_parallel(CNNModel* model, float input[INPUT_SIZE][INPUT_SIZE][CHANNELS], float output[CONV_OUT][CONV_OUT][CONV_DEPTH]) {
-    int num_proc = NUM_PROCESS;
-    int pid;
-    for (int p = 0; p < num_proc; p++) {
-        pid = fork();
+void conv_forward_parallel(CNNModel* model, float input[INPUT_SIZE][INPUT_SIZE][CHANNELS],
+                           float output[CONV_OUT][CONV_OUT][CONV_DEPTH], double* child_times) {
+    for (int p = 0; p < NUM_PROCESS; p++) {
+        pid_t pid = fork();
         if (pid == 0) {
-            int start = (CONV_DEPTH / num_proc) * p;
-            int end = (p == num_proc - 1) ? CONV_DEPTH : (CONV_DEPTH / num_proc) * (p + 1);
-            for (int d = start; d < end; d++) {
-                for (int i = 0; i < CONV_OUT; i++) {
+            struct timeval t0, t1;
+            gettimeofday(&t0, NULL);
+
+            int start = (CONV_DEPTH / NUM_PROCESS) * p;
+            int end = (p == NUM_PROCESS - 1) ? CONV_DEPTH : (CONV_DEPTH / NUM_PROCESS) * (p + 1);
+
+            for (int d = start; d < end; d++)
+                for (int i = 0; i < CONV_OUT; i++)
                     for (int j = 0; j < CONV_OUT; j++) {
                         float sum = model->conv.biases[d];
-                        for (int c = 0; c < CHANNELS; c++) {
-                            for (int ki = 0; ki < KERNEL_SIZE; ki++) {
-                                for (int kj = 0; kj < KERNEL_SIZE; kj++) {
+                        for (int c = 0; c < CHANNELS; c++)
+                            for (int ki = 0; ki < KERNEL_SIZE; ki++)
+                                for (int kj = 0; kj < KERNEL_SIZE; kj++)
                                     sum += model->conv.weights[d][c][ki][kj] * input[i + ki][j + kj][c];
-                                }
-                            }
-                        }
                         output[i][j][d] = sum;
                     }
-                }
-            }
+
+            gettimeofday(&t1, NULL);
+            double ct = timer_ms(t0, t1);
+            child_times[p] = ct;
             exit(0);
         }
     }
-    for (int p = 0; p < num_proc; p++) wait(NULL);
+    for (int p = 0; p < NUM_PROCESS; p++) wait(NULL);
 }
 
 void relu_forward(float in[CONV_OUT][CONV_OUT][CONV_DEPTH], float out[CONV_OUT][CONV_OUT][CONV_DEPTH]) {
@@ -138,24 +140,29 @@ void flatten(float in[CONV_OUT/2][CONV_OUT/2][CONV_DEPTH], float out[]) {
                 out[idx++] = in[i][j][d];
 }
 
-void fc1_forward_parallel(CNNModel* model, float input[], float output[FC1_OUT]) {
-    int num_proc = NUM_PROCESS;
-    int pid;
-    for (int p = 0; p < num_proc; p++) {
-        pid = fork();
+void fc1_forward_parallel(CNNModel* model, float input[], float output[FC1_OUT], double* child_times) {
+    for (int p = 0; p < NUM_PROCESS; p++) {
+        pid_t pid = fork();
         if (pid == 0) {
-            int start = (FC1_OUT / num_proc) * p;
-            int end = (p == num_proc - 1) ? FC1_OUT : (FC1_OUT / num_proc) * (p + 1);
+            struct timeval t0, t1;
+            gettimeofday(&t0, NULL);
+
+            int start = (FC1_OUT / NUM_PROCESS) * p;
+            int end = (p == NUM_PROCESS - 1) ? FC1_OUT : (FC1_OUT / NUM_PROCESS) * (p + 1);
+
             for (int i = start; i < end; i++) {
                 output[i] = model->fc1.biases[i];
-                for (int j = 0; j < (CONV_OUT/2)*(CONV_OUT/2)*CONV_DEPTH; j++) {
+                for (int j = 0; j < (CONV_OUT / 2) * (CONV_OUT / 2) * CONV_DEPTH; j++)
                     output[i] += model->fc1.weights[i][j] * input[j];
-                }
             }
+
+            gettimeofday(&t1, NULL);
+            double ft = timer_ms(t0, t1);
+            child_times[p] = ft;
             exit(0);
         }
     }
-    for (int p = 0; p < num_proc; p++) wait(NULL);
+    for (int p = 0; p < NUM_PROCESS; p++) wait(NULL);
 }
 
 void fc2_forward(CNNModel* model, float input[], float output[FC2_OUT]) {
@@ -202,6 +209,9 @@ int main() {
     fc1_time  = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     fc2_time  = mmap(NULL, sizeof(double), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
+    double* conv_child_times = mmap(NULL, sizeof(double) * NUM_PROCESS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    double* fc1_child_times  = mmap(NULL, sizeof(double) * NUM_PROCESS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
@@ -227,34 +237,28 @@ int main() {
         struct timeval t0, t1;
         double ct, rt, pt, f1t, f2t;
 
-        // Conv
         gettimeofday(&t0, NULL);
-        conv_forward_parallel(model, inputs[i], conv_out);  // 내부에서 여러 C# fork 발생
+        conv_forward_parallel(model, inputs[i], conv_out, conv_child_times);  
         gettimeofday(&t1, NULL);
         ct = timer_ms(t0, t1);
 
-        // ReLU
         gettimeofday(&t0, NULL);
         relu_forward(conv_out, relu_out);
         gettimeofday(&t1, NULL);
         rt = timer_ms(t0, t1);
 
-        // MaxPool
         gettimeofday(&t0, NULL);
         maxpool_forward(relu_out, pool_out);
         gettimeofday(&t1, NULL);
         pt = timer_ms(t0, t1);
 
-        // Flatten
         flatten(pool_out, flat);
 
-        // FC1
         gettimeofday(&t0, NULL);
-        fc1_forward_parallel(model, flat, fc1_out);  // 내부에서 여러 C# fork 발생
+        fc1_forward_parallel(model, flat, fc1_out, fc1_child_times);  
         gettimeofday(&t1, NULL);
         f1t = timer_ms(t0, t1);
 
-        // FC2
         gettimeofday(&t0, NULL);
         fc2_forward(model, fc1_out, fc2_out);
         gettimeofday(&t1, NULL);
@@ -284,9 +288,16 @@ int main() {
         for (int j = 0; j < 5; j++) printf("%.2f ", fc2_out[j]);
         printf("\n");
 
-        printf("[Conv] [C0] %.3f ms\n", ct);
-        printf("[FC1 ] [C0] %.3f ms\n", f1t);
-        printf("[FC2 ] [C0] %.3f ms\n", f2t);
+        printf("[Conv] ");
+        for (int p = 0; p < NUM_PROCESS; p++)
+            printf("[C%d] %.3f ms ", p, conv_child_times[p]);
+        printf("\n");
+
+        printf("[FC1] ");
+        for (int p = 0; p < NUM_PROCESS; p++)
+            printf("[C%d] %.3f ms ", p, fc1_child_times[p]);
+        printf("\n");
+
         pthread_mutex_unlock(print_mutex);
 
         munmap(conv_out, sizeof(float) * CONV_OUT * CONV_OUT * CONV_DEPTH);
