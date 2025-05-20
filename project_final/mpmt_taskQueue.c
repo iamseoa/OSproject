@@ -1,9 +1,9 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <stdatomic.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -20,8 +20,9 @@
 #define FC1_OUT 256
 #define FC2_OUT 100
 #define NUM_INPUTS 8
-#define NUM_THREADS 4
-#define QUEUE_SIZE 2
+#define NUM_THREADS 2       
+#define NUM_PROCESSES 2     
+#define QUEUE_SIZE NUM_INPUTS
 
 typedef struct {
     float conv_out[CONV_OUT][CONV_OUT][CONV_DEPTH];
@@ -40,7 +41,7 @@ typedef struct {
 } ConvLayer;
 
 typedef struct {
-    float weights[FC1_OUT][(CONV_OUT / 2) * (CONV_OUT / 2) * CONV_DEPTH];
+    float weights[FC1_OUT][(CONV_OUT / 2)*(CONV_OUT / 2)*CONV_DEPTH];
     float biases[FC1_OUT];
 } FullyConnectedLayer1;
 
@@ -55,9 +56,6 @@ typedef struct {
     FullyConnectedLayer2 fc2;
 } CNNModel;
 
-CNNModel* model;
-Task* task_pool;
-
 typedef struct {
     Task* buffer[QUEUE_SIZE];
     int front, rear, count;
@@ -65,25 +63,22 @@ typedef struct {
     pthread_cond_t not_empty, not_full;
 } TaskQueue;
 
+CNNModel* model;
+Task* task_pool;
 TaskQueue* queue;
 int* task_done_count;
-int* producer_finished;
+_Atomic int* producer_finished;
 pthread_mutex_t* task_done_mutex;
 pthread_mutex_t* print_mutex;
 
 void initialize_weights(CNNModel* model) {
-    int kernel[3][3] = {
-        {1, 2, 1},
-        {2, 4, 2},
-        {1, 2, 1}
-    };
-
+    int kernel[3][3] = {{1, 2, 1}, {2, 4, 2}, {1, 2, 1}};
     for (int d = 0; d < CONV_DEPTH; d++) {
         model->conv.biases[d] = 1.0f;
         for (int c = 0; c < CHANNELS; c++)
             for (int i = 0; i < KERNEL_SIZE; i++)
                 for (int j = 0; j < KERNEL_SIZE; j++)
-                    model->conv.weights[d][c][i][j] = kernel[i][j]; 
+                    model->conv.weights[d][c][i][j] = kernel[i][j];
     }
 
     for (int i = 0; i < FC1_OUT; i++) {
@@ -98,6 +93,7 @@ void initialize_weights(CNNModel* model) {
             model->fc2.weights[i][j] = (i == j) ? 1.0f : 0.0f;
     }
 }
+
 void initialize_input(Task* t, int id) {
     float center = 9.0f * (id + 1);
     t->input_id = id;
@@ -133,14 +129,12 @@ void conv_relu_pool_fc(Task* t) {
             }
     for (int i = 0; i < FC1_OUT; i++) {
         float sum = model->fc1.biases[i];
-        for (int j = 0; j < idx; j++)
-            sum += model->fc1.weights[i][j] * t->flat[j];
+        for (int j = 0; j < idx; j++) sum += model->fc1.weights[i][j] * t->flat[j];
         t->fc1_out[i] = sum;
     }
     for (int i = 0; i < FC2_OUT; i++) {
         float sum = model->fc2.biases[i];
-        for (int j = 0; j < FC1_OUT; j++)
-            sum += model->fc2.weights[i][j] * t->fc1_out[j];
+        for (int j = 0; j < FC1_OUT; j++) sum += model->fc2.weights[i][j] * t->fc1_out[j];
         t->fc2_out[i] = sum;
     }
 }
@@ -158,58 +152,52 @@ void* producer(void* arg) {
         pthread_cond_signal(&queue->not_empty);
         pthread_mutex_unlock(&queue->mutex);
     }
-    pthread_mutex_lock(task_done_mutex);
-    *producer_finished = 1;
-    pthread_mutex_unlock(task_done_mutex);
+    atomic_store(producer_finished, 1);
     pthread_cond_broadcast(&queue->not_empty);
     return NULL;
 }
 
 void* consumer(void* arg) {
-    struct rusage usage_start, usage_end;
-    struct timespec wall_start, wall_end;
-
     while (1) {
         pthread_mutex_lock(&queue->mutex);
-
-        if (*producer_finished && queue->count == 0) {
+        if (atomic_load(producer_finished) && queue->count == 0) {
             pthread_mutex_unlock(&queue->mutex);
             return NULL;
         }
-
         while (queue->count == 0) {
-            if (*producer_finished) {
+            if (atomic_load(producer_finished)) {
                 pthread_mutex_unlock(&queue->mutex);
                 return NULL;
             }
             pthread_cond_wait(&queue->not_empty, &queue->mutex);
         }
-
         Task* t = queue->buffer[queue->front];
         queue->front = (queue->front + 1) % QUEUE_SIZE;
         queue->count--;
-
-        getrusage(RUSAGE_SELF, &usage_start);
-        clock_gettime(CLOCK_MONOTONIC, &wall_start);
-
         pthread_cond_signal(&queue->not_full);
         pthread_mutex_unlock(&queue->mutex);
-        
+
+        struct timespec main_start, main_end;
+        struct rusage main_usage_start, main_usage_end;
+    
+        clock_gettime(CLOCK_MONOTONIC, &main_start);
+        getrusage(RUSAGE_SELF, &main_usage_start);
+
         conv_relu_pool_fc(t);
 
-        clock_gettime(CLOCK_MONOTONIC, &wall_end);
-        getrusage(RUSAGE_SELF, &usage_end);
+        clock_gettime(CLOCK_MONOTONIC, &main_end);
+        getrusage(RUSAGE_SELF, &main_usage_end);
 
-        double user_usec = (usage_end.ru_utime.tv_sec - usage_start.ru_utime.tv_sec) * 1e6 +
-                       (usage_end.ru_utime.tv_usec - usage_start.ru_utime.tv_usec);
-        double sys_usec = (usage_end.ru_stime.tv_sec - usage_start.ru_stime.tv_sec) * 1e6 +
-                        (usage_end.ru_stime.tv_usec - usage_start.ru_stime.tv_usec);
-        double wall_msec = (wall_end.tv_sec - wall_start.tv_sec) * 1e3 +
-                        (wall_end.tv_nsec - wall_start.tv_nsec) / 1e6;
+        double user_usec = (main_usage_end.ru_utime.tv_sec - main_usage_start.ru_utime.tv_sec) * 1e6 +
+                           (main_usage_end.ru_utime.tv_usec - main_usage_start.ru_utime.tv_usec);
+        double sys_usec = (main_usage_end.ru_stime.tv_sec - main_usage_start.ru_stime.tv_sec) * 1e6 +
+                          (main_usage_end.ru_stime.tv_usec - main_usage_start.ru_stime.tv_usec);
+        double wall_msec = (main_end.tv_sec - main_start.tv_sec) * 1e3 +
+                           (main_end.tv_nsec - main_start.tv_nsec) / 1e6;
         double cpu_util = 100.0 * (user_usec + sys_usec) / 1000.0 / wall_msec;
-        
+
         pthread_mutex_lock(print_mutex);
-        printf("[Consumer] Input ID: %d\n", t->input_id);
+        printf("[Consumer %d] Input ID: %d\n", getpid(), t->input_id);
         printf("Input Patch [0:3][0:3][0]:\n");
         for (int x = 0; x < 3; x++) {
             for (int y = 0; y < 3; y++)
@@ -222,7 +210,6 @@ void* consumer(void* arg) {
         printf("\nfc2[0:5] = ");
         for (int j = 0; j < 5; j++) printf("%.2f ", t->fc2_out[j]);
         printf("\n");
-
         printf("== Resource Usage ==\n");
         printf("User CPU Time   : %.3f ms\n", user_usec / 1000.0);
         printf("System CPU Time : %.3f ms\n", sys_usec / 1000.0);
@@ -234,7 +221,6 @@ void* consumer(void* arg) {
         (*task_done_count)++;
         pthread_mutex_unlock(task_done_mutex);
     }
-    return NULL;
 }
 
 int main() {
@@ -242,18 +228,12 @@ int main() {
     task_pool = mmap(NULL, sizeof(Task) * NUM_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     queue = mmap(NULL, sizeof(TaskQueue), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     task_done_count = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    producer_finished = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    producer_finished = mmap(NULL, sizeof(_Atomic int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     task_done_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     print_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
     *task_done_count = 0;
-    *producer_finished = 0;
-
-    struct timespec main_start, main_end;
-    struct rusage main_usage_start, main_usage_end;
-
-    clock_gettime(CLOCK_MONOTONIC, &main_start);
-    getrusage(RUSAGE_SELF, &main_usage_start);
+    atomic_store(producer_finished, 0);
 
     pthread_mutexattr_t mattr;
     pthread_mutexattr_init(&mattr);
@@ -271,43 +251,53 @@ int main() {
     queue->front = queue->rear = queue->count = 0;
     initialize_weights(model);
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        pthread_t prod;
-        pthread_create(&prod, NULL, producer, NULL);
-        pthread_join(prod, NULL);
+    struct timespec wall_start, wall_end;
+    struct rusage usage_self_start, usage_self_end, usage_child_end;
+    clock_gettime(CLOCK_MONOTONIC, &wall_start);
+    getrusage(RUSAGE_SELF, &usage_self_start);
+
+    pid_t producer_pid = fork();
+    if (producer_pid == 0) {
+        producer(NULL);
         exit(0);
-    } else {
-        pthread_t cons[NUM_THREADS];
-        for (int i = 0; i < NUM_THREADS; i++)
-            pthread_create(&cons[i], NULL, consumer, NULL);
-
-        wait(NULL);
-
-        pthread_mutex_lock(&queue->mutex);
-        pthread_cond_broadcast(&queue->not_empty);
-        pthread_mutex_unlock(&queue->mutex);
-
-        for (int i = 0; i < NUM_THREADS; i++)
-            pthread_join(cons[i], NULL);
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &main_end);
-    getrusage(RUSAGE_SELF, &main_usage_end);
+    pid_t workers[NUM_PROCESSES];
+    for (int i = 0; i < NUM_PROCESSES; i++) {
+        if ((workers[i] = fork()) == 0) {
+            pthread_t threads[NUM_THREADS];
+            for (int j = 0; j < NUM_THREADS; j++)
+                pthread_create(&threads[j], NULL, consumer, NULL);
+            for (int j = 0; j < NUM_THREADS; j++)
+                pthread_join(threads[j], NULL);
+            exit(0);
+        }
+    }
 
-    double main_user_usec = (main_usage_end.ru_utime.tv_sec - main_usage_start.ru_utime.tv_sec) * 1e6 +
-                            (main_usage_end.ru_utime.tv_usec - main_usage_start.ru_utime.tv_usec);
-    double main_sys_usec = (main_usage_end.ru_stime.tv_sec - main_usage_start.ru_stime.tv_sec) * 1e6 +
-                        (main_usage_end.ru_stime.tv_usec - main_usage_start.ru_stime.tv_usec);
-    double main_wall_msec = (main_end.tv_sec - main_start.tv_sec) * 1e3 +
-                            (main_end.tv_nsec - main_start.tv_nsec) / 1e6;
-    double main_cpu_util = 100.0 * (main_user_usec + main_sys_usec) / 1000.0 / main_wall_msec;
+    waitpid(producer_pid, NULL, 0);
+    for (int i = 0; i < NUM_PROCESSES; i++)
+        waitpid(workers[i], NULL, 0);
 
-    printf("\n== Final Performance Metrics ==\n");
-    printf("Wall Clock Time    : %.3f ms\n", main_wall_msec);
-    printf("User CPU Time      : %.3f ms\n", main_user_usec / 1000.0);
-    printf("System CPU Time    : %.3f ms\n", main_sys_usec / 1000.0);
-    printf("CPU Utilization    : %.2f %%\n", main_cpu_util);
+    clock_gettime(CLOCK_MONOTONIC, &wall_end);
+    getrusage(RUSAGE_SELF, &usage_self_end);
+    getrusage(RUSAGE_CHILDREN, &usage_child_end);
+
+    double user_usec = (usage_self_end.ru_utime.tv_sec - usage_self_start.ru_utime.tv_sec) * 1e6 +
+                       (usage_self_end.ru_utime.tv_usec - usage_self_start.ru_utime.tv_usec) +
+                       (usage_child_end.ru_utime.tv_sec * 1e6 + usage_child_end.ru_utime.tv_usec);
+    double sys_usec = (usage_self_end.ru_stime.tv_sec - usage_self_start.ru_stime.tv_sec) * 1e6 +
+                      (usage_self_end.ru_stime.tv_usec - usage_self_start.ru_stime.tv_usec) +
+                      (usage_child_end.ru_stime.tv_sec * 1e6 + usage_child_end.ru_stime.tv_usec);
+    double wall_msec = (wall_end.tv_sec - wall_start.tv_sec) * 1e3 +
+                       (wall_end.tv_nsec - wall_start.tv_nsec) / 1e6;
+    double cpu_util = 100.0 * (user_usec + sys_usec) / 1000.0 / wall_msec;
+
+    printf("== Final Performance Metrics ==\n");
+    printf("Wall Clock Time    : %.2f ms\n", wall_msec);
+    printf("User CPU Time      : %.2f ms\n", user_usec / 1000.0);
+    printf("System CPU Time    : %.2f ms\n", sys_usec / 1000.0);
+    printf("CPU Utilization    : %.2f %%\n", cpu_util);
+    printf("Total Tasks Done   : %d\n", *task_done_count);
 
     return 0;
 }
