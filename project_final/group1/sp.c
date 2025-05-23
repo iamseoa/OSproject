@@ -20,7 +20,7 @@
 #define FC1_OUT 256
 #define FC2_OUT 100
 #define NUM_INPUTS 40
-#define NUM_PROCESSES 2
+#define NUM_PROCESSES 1
 #define QUEUE_SIZE NUM_INPUTS
 
 typedef struct {
