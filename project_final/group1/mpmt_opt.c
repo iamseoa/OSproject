@@ -19,9 +19,9 @@
 #define CONV_OUT (INPUT_SIZE - KERNEL_SIZE + 1)
 #define FC1_OUT 256
 #define FC2_OUT 100
-#define NUM_INPUTS 40 
-#define NUM_THREADS 1    
-#define NUM_PROCESSES 4     
+#define NUM_INPUTS 40
+#define NUM_THREADS 2
+#define NUM_PROCESSES 2
 #define QUEUE_SIZE NUM_INPUTS
 
 typedef struct {
@@ -57,19 +57,16 @@ typedef struct {
 } CNNModel;
 
 typedef struct {
+    atomic_size_t front, rear;
+    atomic_int lock;
     Task* buffer[QUEUE_SIZE];
-    int front, rear, count;
-    pthread_mutex_t mutex;
-    pthread_cond_t not_empty, not_full;
-} TaskQueue;
+} LockFreeQueue;
 
 CNNModel* model;
 Task* task_pool;
-TaskQueue* queue;
-int* task_done_count;
+LockFreeQueue* queue;
+_Atomic int* task_done_count;
 _Atomic int* producer_finished;
-pthread_mutex_t* task_done_mutex;
-pthread_mutex_t* print_mutex;
 
 void initialize_weights(CNNModel* model) {
     int kernel[3][3] = {{1, 2, 1}, {2, 4, 2}, {1, 2, 1}};
@@ -101,6 +98,33 @@ void initialize_input(Task* t, int id) {
         for (int i = 0; i < INPUT_SIZE; i++)
             for (int j = 0; j < INPUT_SIZE; j++)
                 t->input[i][j][c] = (i == 1 && j == 1) ? center : 1.0f;
+}
+
+int lock_free_enqueue(LockFreeQueue* q, Task* task) {
+    while (atomic_exchange(&q->lock, 1) == 1) sched_yield();
+    size_t rear = atomic_load(&q->rear);
+    size_t next = (rear + 1) % QUEUE_SIZE;
+    if (next == atomic_load(&q->front)) {
+        atomic_store(&q->lock, 0);
+        return 0;
+    }
+    q->buffer[rear] = task;
+    atomic_store(&q->rear, next);
+    atomic_store(&q->lock, 0);
+    return 1;
+}
+
+Task* lock_free_dequeue(LockFreeQueue* q) {
+    while (atomic_exchange(&q->lock, 1) == 1) sched_yield();
+    size_t front = atomic_load(&q->front);
+    if (front == atomic_load(&q->rear)) {
+        atomic_store(&q->lock, 0);
+        return NULL;
+    }
+    Task* t = q->buffer[front];
+    atomic_store(&q->front, (front + 1) % QUEUE_SIZE);
+    atomic_store(&q->lock, 0);
+    return t;
 }
 
 void conv_relu_pool_fc(Task* t) {
@@ -139,64 +163,15 @@ void conv_relu_pool_fc(Task* t) {
     }
 }
 
-void* producer(void* arg) {
-    for (int i = 0; i < NUM_INPUTS; i++) {
-        Task* t = &task_pool[i];
-        initialize_input(t, i);
-        pthread_mutex_lock(&queue->mutex);
-        while (queue->count == QUEUE_SIZE)
-            pthread_cond_wait(&queue->not_full, &queue->mutex);
-        queue->buffer[queue->rear] = t;
-        queue->rear = (queue->rear + 1) % QUEUE_SIZE;
-        queue->count++;
-        pthread_cond_signal(&queue->not_empty);
-        pthread_mutex_unlock(&queue->mutex);
-    }
-    atomic_store(producer_finished, 1);
-    pthread_cond_broadcast(&queue->not_empty);
-    return NULL;
-}
-
 void* consumer(void* arg) {
     while (1) {
-        pthread_mutex_lock(&queue->mutex);
-        if (atomic_load(producer_finished) && queue->count == 0) {
-            pthread_mutex_unlock(&queue->mutex);
-            return NULL;
+        Task* t = lock_free_dequeue(queue);
+        if (!t) {
+            if (atomic_load(producer_finished) && atomic_load(task_done_count) >= NUM_INPUTS) break;
+            sched_yield();
+            continue;
         }
-        while (queue->count == 0) {
-            if (atomic_load(producer_finished)) {
-                pthread_mutex_unlock(&queue->mutex);
-                return NULL;
-            }
-            pthread_cond_wait(&queue->not_empty, &queue->mutex);
-        }
-        Task* t = queue->buffer[queue->front];
-        queue->front = (queue->front + 1) % QUEUE_SIZE;
-        queue->count--;
-        pthread_cond_signal(&queue->not_full);
-        pthread_mutex_unlock(&queue->mutex);
-
-        struct timespec main_start, main_end;
-        struct rusage main_usage_start, main_usage_end;
-    
-        clock_gettime(CLOCK_MONOTONIC, &main_start);
-        getrusage(RUSAGE_SELF, &main_usage_start);
-
         conv_relu_pool_fc(t);
-
-        clock_gettime(CLOCK_MONOTONIC, &main_end);
-        getrusage(RUSAGE_SELF, &main_usage_end);
-
-        double user_usec = (main_usage_end.ru_utime.tv_sec - main_usage_start.ru_utime.tv_sec) * 1e6 +
-                           (main_usage_end.ru_utime.tv_usec - main_usage_start.ru_utime.tv_usec);
-        double sys_usec = (main_usage_end.ru_stime.tv_sec - main_usage_start.ru_stime.tv_sec) * 1e6 +
-                          (main_usage_end.ru_stime.tv_usec - main_usage_start.ru_stime.tv_usec);
-        double wall_msec = (main_end.tv_sec - main_start.tv_sec) * 1e3 +
-                           (main_end.tv_nsec - main_start.tv_nsec) / 1e6;
-        double cpu_util = 100.0 * (user_usec + sys_usec) / 1000.0 / wall_msec;
-
-        pthread_mutex_lock(print_mutex);
         printf("[Consumer %d] Input ID: %d\n", getpid(), t->input_id);
         printf("Input Patch [0:3][0:3][0]:\n");
         for (int x = 0; x < 3; x++) {
@@ -209,56 +184,40 @@ void* consumer(void* arg) {
         for (int j = 0; j < 5; j++) printf("%.2f ", t->fc1_out[j]);
         printf("\nfc2[0:5] = ");
         for (int j = 0; j < 5; j++) printf("%.2f ", t->fc2_out[j]);
-        printf("\n");
-        printf("== Resource Usage ==\n");
-        printf("User CPU Time   : %.3f ms\n", user_usec / 1000.0);
-        printf("System CPU Time : %.3f ms\n", sys_usec / 1000.0);
-        printf("CPU Utilization : %.2f %%\n", cpu_util);
-        printf("Wall Clock Time : %.3f ms\n\n", wall_msec);
-        pthread_mutex_unlock(print_mutex);
-
-        pthread_mutex_lock(task_done_mutex);
-        (*task_done_count)++;
-        pthread_mutex_unlock(task_done_mutex);
+        printf("\n\n");
+        atomic_fetch_add(task_done_count, 1);
     }
+    return NULL;
 }
 
 int main() {
     model = mmap(NULL, sizeof(CNNModel), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     task_pool = mmap(NULL, sizeof(Task) * NUM_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    queue = mmap(NULL, sizeof(TaskQueue), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    task_done_count = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    queue = mmap(NULL, sizeof(LockFreeQueue), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    task_done_count = mmap(NULL, sizeof(_Atomic int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     producer_finished = mmap(NULL, sizeof(_Atomic int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    task_done_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    print_mutex = mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
-    *task_done_count = 0;
+    atomic_store(task_done_count, 0);
     atomic_store(producer_finished, 0);
+    atomic_store(&queue->front, 0);
+    atomic_store(&queue->rear, 0);
+    atomic_store(&queue->lock, 0);
 
-    pthread_mutexattr_t mattr;
-    pthread_mutexattr_init(&mattr);
-    pthread_mutexattr_setpshared(&mattr, PTHREAD_PROCESS_SHARED);
-    pthread_mutex_init(&queue->mutex, &mattr);
-    pthread_mutex_init(task_done_mutex, &mattr);
-    pthread_mutex_init(print_mutex, &mattr);
-
-    pthread_condattr_t cattr;
-    pthread_condattr_init(&cattr);
-    pthread_condattr_setpshared(&cattr, PTHREAD_PROCESS_SHARED);
-    pthread_cond_init(&queue->not_empty, &cattr);
-    pthread_cond_init(&queue->not_full, &cattr);
-
-    queue->front = queue->rear = queue->count = 0;
     initialize_weights(model);
 
     struct timespec wall_start, wall_end;
-    struct rusage usage_self_start, usage_self_end, usage_child_end;
+    struct rusage usage_start, usage_end, usage_child;
     clock_gettime(CLOCK_MONOTONIC, &wall_start);
-    getrusage(RUSAGE_SELF, &usage_self_start);
+    getrusage(RUSAGE_SELF, &usage_start);
 
     pid_t producer_pid = fork();
     if (producer_pid == 0) {
-        producer(NULL);
+        for (int i = 0; i < NUM_INPUTS; i++) {
+            Task* t = &task_pool[i];
+            initialize_input(t, i);
+            while (!lock_free_enqueue(queue, t)) sched_yield();
+        }
+        atomic_store(producer_finished, 1);
         exit(0);
     }
 
@@ -274,30 +233,32 @@ int main() {
         }
     }
 
+    while (atomic_load(task_done_count) < NUM_INPUTS) usleep(100);
+
     waitpid(producer_pid, NULL, 0);
     for (int i = 0; i < NUM_PROCESSES; i++)
         waitpid(workers[i], NULL, 0);
 
     clock_gettime(CLOCK_MONOTONIC, &wall_end);
-    getrusage(RUSAGE_SELF, &usage_self_end);
-    getrusage(RUSAGE_CHILDREN, &usage_child_end);
+    getrusage(RUSAGE_SELF, &usage_end);
+    getrusage(RUSAGE_CHILDREN, &usage_child);
 
-    double user_usec = (usage_self_end.ru_utime.tv_sec - usage_self_start.ru_utime.tv_sec) * 1e6 +
-                       (usage_self_end.ru_utime.tv_usec - usage_self_start.ru_utime.tv_usec) +
-                       (usage_child_end.ru_utime.tv_sec * 1e6 + usage_child_end.ru_utime.tv_usec);
-    double sys_usec = (usage_self_end.ru_stime.tv_sec - usage_self_start.ru_stime.tv_sec) * 1e6 +
-                      (usage_self_end.ru_stime.tv_usec - usage_self_start.ru_stime.tv_usec) +
-                      (usage_child_end.ru_stime.tv_sec * 1e6 + usage_child_end.ru_stime.tv_usec);
+    double user_usec = (usage_end.ru_utime.tv_sec - usage_start.ru_utime.tv_sec) * 1e6 +
+                       (usage_end.ru_utime.tv_usec - usage_start.ru_utime.tv_usec) +
+                       (usage_child.ru_utime.tv_sec * 1e6 + usage_child.ru_utime.tv_usec);
+    double sys_usec = (usage_end.ru_stime.tv_sec - usage_start.ru_stime.tv_sec) * 1e6 +
+                      (usage_end.ru_stime.tv_usec - usage_start.ru_stime.tv_usec) +
+                      (usage_child.ru_stime.tv_sec * 1e6 + usage_child.ru_stime.tv_usec);
     double wall_msec = (wall_end.tv_sec - wall_start.tv_sec) * 1e3 +
                        (wall_end.tv_nsec - wall_start.tv_nsec) / 1e6;
     double cpu_util = 100.0 * (user_usec + sys_usec) / 1000.0 / wall_msec;
 
-    printf("== Final Performance Metrics ==\n");
-    printf("Wall Clock Time    : %.2f ms\n", wall_msec);
-    printf("User CPU Time      : %.2f ms\n", user_usec / 1000.0);
-    printf("System CPU Time    : %.2f ms\n", sys_usec / 1000.0);
-    printf("CPU Utilization    : %.2f %%\n", cpu_util);
+    printf("\n== Resource Usage ==\n");
+    printf("User CPU Time   : %.3f ms\n", user_usec / 1000.0);
+    printf("System CPU Time : %.3f ms\n", sys_usec / 1000.0);
+    printf("CPU Utilization : %.2f %%\n", cpu_util);
+    printf("Wall Clock Time : %.3f ms\n\n", wall_msec);
     printf("Total Tasks Done   : %d\n", *task_done_count);
-
     return 0;
 }
+
