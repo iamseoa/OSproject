@@ -20,7 +20,7 @@
 #define FC1_OUT 256
 #define FC2_OUT 100
 #define NUM_INPUTS 40
-#define NUM_PROCESSES 2
+#define NUM_PROCESSES 4 
 #define QUEUE_SIZE NUM_INPUTS
 
 typedef struct {
@@ -225,6 +225,23 @@ void* consumer(void* arg) {
     return NULL;
 }
 
+void print_memory_usage() {
+    FILE* fp = fopen("/proc/self/status", "r");
+    if (!fp) {
+        perror("fopen");
+        return;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "VmRSS:", 6) == 0 || strncmp(line, "VmSize:", 7) == 0) {
+            printf("%s", line); 
+        }
+    }
+
+    fclose(fp);
+}
+
 int main() {
     model = mmap(NULL, sizeof(CNNModel), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     task_pool = mmap(NULL, sizeof(Task) * NUM_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -295,6 +312,7 @@ int main() {
     printf("System CPU Time    : %.2f ms\n", sys_usec / 1000.0);
     printf("CPU Utilization    : %.2f %%\n", cpu_util);
     printf("Total Tasks Done   : %d\n", *task_done_count);
+    print_memory_usage();
 
     return 0;
 }

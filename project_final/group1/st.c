@@ -220,6 +220,23 @@ void* consumer(void* arg) {
     return NULL;
 }
 
+void print_memory_usage() {
+    FILE* fp = fopen("/proc/self/status", "r");
+    if (!fp) {
+        perror("fopen");
+        return;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "VmRSS:", 6) == 0 || strncmp(line, "VmSize:", 7) == 0) {
+            printf("%s", line); 
+        }
+    }
+
+    fclose(fp);
+}
+
 int main() {
     pthread_mutex_init(&queue.mutex, NULL);
     pthread_cond_init(&queue.not_empty, NULL);
@@ -260,6 +277,7 @@ int main() {
     printf("System CPU Time    : %.2f ms\n", sys_usec / 1000.0);
     printf("CPU Utilization    : %.2f %%\n", cpu_util);
     printf("Total Tasks Done   : %d\n", task_done_count);
+    print_memory_usage();
 
     return 0;
 }
