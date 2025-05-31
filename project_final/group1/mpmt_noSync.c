@@ -173,19 +173,12 @@ void* consumer(void* arg) {
         double cpu_util = 100.0 * (user_usec + sys_usec) / 1000.0 / wall_msec;
 
         printf("[Consumer %d] Input ID: %d\n", getpid(), t->input_id);
-        printf("Input Patch [0:3][0:3][0]:\n");
-        for (int x = 0; x < 3; x++) {
-            for (int y = 0; y < 3; y++)
-                printf("%.1f ", t->input[x][y][0]);
-            printf("\n");
-        }
         printf("Conv Output [0][0][0] = %.2f\n", t->conv_out[0][0][0]);
         printf("fc1[0:5] = ");
         for (int j = 0; j < 5; j++) printf("%.2f ", t->fc1_out[j]);
         printf("\nfc2[0:5] = ");
         for (int j = 0; j < 5; j++) printf("%.2f ", t->fc2_out[j]);
-        printf("\n");
-        printf("== Resource Usage ==\n");
+        printf("\n== Resource Usage ==\n");
         printf("User CPU Time   : %.3f ms\n", user_usec / 1000.0);
         printf("System CPU Time : %.3f ms\n", sys_usec / 1000.0);
         printf("CPU Utilization : %.2f %%\n", cpu_util);
@@ -270,6 +263,6 @@ int main() {
     printf("CPU Utilization    : %.2f %%\n", cpu_util);
     printf("Total Tasks Done   : %d\n", *task_done_count);
     print_memory_usage();
-    
+
     return 0;
 }
